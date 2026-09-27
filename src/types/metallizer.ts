@@ -31,8 +31,12 @@ export interface MetallizerMachineSettings {
   machine_name: string; // "Metallizer Slitter"
   physical_ups: number; // 6
   preferred_ups: number; // 3
+  /** When false (default): only 3-UPS PS01 mother packs. When true: allow 4-UPS fallback as before. */
+  allow_4_ups?: boolean;
   max_planning_ups: number; // 6 (MSL has 6 UPS available, can use 1 to 6 UPS)
   max_jumbo_width_mm: number; // 3650
+  /** PS01 mother deckle for MSL jumbo synthesis. Options: 10400 | 8700 */
+  ps01_deckle_width_mm?: number;
   max_jumbo_diameter_mm: number; // 1250
   min_trim_mm: number; // 20
   max_trim_mm: number; // 30

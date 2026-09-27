@@ -27,6 +27,16 @@ import {
 import { VA05Order, SlitterPlan, UserProfile, PlanStatus } from '../../types';
 import { JumboRequirement, SSMachineSettings, JumboRoll, SSPlan } from '../../types/ss';
 import { isSSOrder, generateSSJumboRollRequirements, SS_CUSTOMER_MAX_OVERALLOCATION_FACTOR } from '../../services/ss/ssOptimizer';
+import {
+  isSsPsEngineFilm,
+  generateSsJumboRequirementsViaPsEngine,
+} from '../../services/ss/ssPsEngineAdapter';
+import {
+  cachePsEnginePlan,
+  getCachedPsEnginePlan,
+} from '../../services/ss/ssPsPlanCache';
+import { getFilmSpecsDatabase, getFilmSpecsSnapshotForPlanning } from '../../services/stuffing/filmDensities';
+import { SS_PS01_DECKLE_OPTIONS } from '../../services/ss/ssMasterData';
 import type { SSWorkerResponse } from '../../services/ss/ss.worker';
 import SSWorker from '../../services/ss/ss.worker?worker&inline';
 import { 
@@ -40,7 +50,8 @@ import {
   saveStoredJumboRequirements, 
   getStoredJumboRolls, 
   saveStoredJumboRolls,
-  getStoredSSPlans
+  getStoredSSPlans,
+  saveStoredSSSettings
 } from '../../services/ss/ssStorage';
 import { 
   generatePS01PlanForSingleJumbo,
@@ -67,6 +78,7 @@ interface SSJumboRequirementsViewProps {
   preselectedFilm?: string;
   onRequirementsUpdated: (reqs: JumboRequirement[]) => void;
   onNavigateToStudio: () => void;
+  onSettingsSaved?: (settings: SSMachineSettings) => void;
 }
 
 export const SSJumboRequirementsView: React.FC<SSJumboRequirementsViewProps> = ({
@@ -78,6 +90,7 @@ export const SSJumboRequirementsView: React.FC<SSJumboRequirementsViewProps> = (
   preselectedFilm,
   onRequirementsUpdated,
   onNavigateToStudio,
+  onSettingsSaved,
 }) => {
   // Filter metallized orders (strictly Film Code contains "MZ")
   const metallizedOrders = orders.filter(o => isSSOrder(o));
@@ -107,6 +120,12 @@ export const SSJumboRequirementsView: React.FC<SSJumboRequirementsViewProps> = (
   const [errorState, setErrorState] = useState<{ message: string; film: string } | null>(null);
   const [isSendingToMsl, setIsSendingToMsl] = useState(false);
   const [isGeneratingPs01, setIsGeneratingPs01] = useState(false);
+  /** Trim window applies to ALL SS films. Engine mode (PS) only for TNBPL10/MATTPL12. */
+  const [ssEngineMode, setSsEngineMode] = useState<'SS_NATIVE' | 'PS_ENGINE'>('SS_NATIVE');
+  const [ssPsTrimMode, setSsPsTrimMode] = useState<'GREEN' | 'YELLOW' | 'CUSTOM'>('GREEN');
+  const [ssPsCustomMinTrim, setSsPsCustomMinTrim] = useState<number>(11);
+  const [ssPsCustomMaxTrim, setSsPsCustomMaxTrim] = useState<number>(35);
+  const psEngineFilmSelected = isSsPsEngineFilm(selectedFilm);
 
   useEffect(() => {
     return () => {
@@ -256,16 +275,46 @@ export const SSJumboRequirementsView: React.FC<SSJumboRequirementsViewProps> = (
   const [selectedPhysicalSsPlan, setSelectedPhysicalSsPlan] = useState<SSPlan | null>(null);
   const activePhysicalPlans = useMemo(() => (plans && plans.length > 0 ? plans : getStoredSSPlans()), [plans]);
 
-  // Open full industrial Slitter Sheet (PlanDetailViewer) for an SS Plan
+  /**
+   * Factory sheet open:
+   * - PS Engine synthesis (has source_ps_plan) → authentic PS PlanDetailViewer sheet
+   * - SS Native synthesis → SS factory sheet via generateMSLSlitterPlan
+   */
   const handleOpenMslSheet = (req: JumboRequirement, originalIndex: number) => {
-    const mslSlitterPlan = generateMSLSlitterPlan(
-      req,
-      originalIndex,
-      selectedFilm,
-      currentUser?.name
-    );
-    setSelectedPlanForFactorySheet(mslSlitterPlan);
+    try {
+      const psPlan = getCachedPsEnginePlan(req as any) || (req as any).source_ps_plan;
+      const fromPsEngine = !!(psPlan && psPlan.id && ((psPlan.items && psPlan.items.length) || (psPlan.segments && psPlan.segments.length)));
+
+      if (fromPsEngine) {
+        const normalized: SlitterPlan = {
+          ...psPlan,
+          machine_id: psPlan.machine_id || 'PS01',
+          machine_name: psPlan.machine_name || 'PRIMARY SLITTER 1 (PS)',
+          doc_ref: psPlan.doc_ref || 'APS/QR/PS/01',
+        };
+        setSelectedPlanForFactorySheet(normalized as any);
+        return;
+      }
+
+      // SS Native (or any plan without embedded PS plan)
+      const mslSlitterPlan = generateMSLSlitterPlan(
+        req,
+        originalIndex,
+        selectedFilm || req.film,
+        currentUser?.name
+      );
+      if (!mslSlitterPlan || !mslSlitterPlan.id) {
+        alert('Could not build SS Factory Sheet for this plan (empty result).');
+        return;
+      }
+      setSelectedPlanForFactorySheet(mslSlitterPlan);
+    } catch (err: any) {
+      console.error('Factory Sheet error:', err);
+      alert(`Factory Sheet failed:\n${err?.message || String(err)}`);
+    }
   };
+
+
 
   // Selected film demand stats (across compatible pool)
   const filmOrders = metallizedOrders.filter(o => compatibleFilmsForSelection.includes(o.film) && o.remaining_qty > 0);
@@ -318,7 +367,7 @@ export const SSJumboRequirementsView: React.FC<SSJumboRequirementsViewProps> = (
     setWasCancelled(false);
     setErrorState(null);
     setGenerationPercent(15);
-    setGenerationProgress('Synthesizing 1–14 UPS combinations & evaluating 10,400mm PS01 deckles...');
+    setGenerationProgress('Synthesizing 1–14 UPS combinations & evaluating PS01 deckles...');
 
     if (workerRef.current) {
       workerRef.current.terminate();
@@ -330,6 +379,132 @@ export const SSJumboRequirementsView: React.FC<SSJumboRequirementsViewProps> = (
       setIsGenerating(false);
       setGenerationProgress('');
       setGenerationPercent(0);
+    };
+
+    // ── PS Engine path (TNBPL10 / MATTPL12 only): fixed 1705 mm — off main thread ──
+    if (psEngineFilmSelected && ssEngineMode === 'PS_ENGINE') {
+      setGenerationProgress(
+        `PS Engine · fixed 1705 mm · trim ${Math.min(ssPsCustomMinTrim, ssPsCustomMaxTrim)}–${Math.max(ssPsCustomMinTrim, ssPsCustomMaxTrim)} mm (${ssPsTrimMode}) (background)...`
+      );
+      setGenerationPercent(25);
+      try {
+        const worker = new SSWorker();
+        workerRef.current = worker;
+
+        const watchdogId = window.setTimeout(() => {
+          if (workerRef.current === worker) {
+            worker.terminate();
+            workerRef.current = null;
+            finishError(
+              'PS Engine timed out (180s). Try fewer open lines or YELLOW trim, then retry.'
+            );
+          }
+        }, 180000);
+
+        worker.onmessage = (e: MessageEvent<SSWorkerResponse>) => {
+          window.clearTimeout(watchdogId);
+          const msg = e.data;
+          if (msg.type === 'SYNTHESIS_SUCCESS' && msg.requirements) {
+            setGenerationPercent(95);
+            const plans = (msg as any).plans as SlitterPlan[] | undefined;
+            let reqs = msg.requirements as JumboRequirement[];
+            if (plans && plans.length) {
+              const byId = new Map(plans.map(p => [p.id, p]));
+              const byNum = new Map(plans.map(p => [p.plan_number, p]));
+              reqs = reqs.map(r => {
+                const sid = (r as any).source_ps_plan_id;
+                const snum = (r as any).source_ps_plan_number;
+                const plan = (r as any).source_ps_plan || (sid && byId.get(sid)) || (snum && byNum.get(snum));
+                if (plan) {
+                  cachePsEnginePlan(r.id, plan);
+                  return { ...r, source_ps_plan: plan, source_ps_plan_id: plan.id, source_ps_plan_number: plan.plan_number } as any;
+                }
+                return r;
+              });
+            }
+            applySynthesisResult(reqs);
+            setIsGenerating(false);
+            setGenerationProgress('');
+            setGenerationPercent(0);
+          } else if (msg.type === 'SS_ERROR') {
+            finishError(msg.error || 'PS Engine failed.');
+          }
+          if (workerRef.current === worker) {
+            worker.terminate();
+            workerRef.current = null;
+          }
+        };
+
+        worker.onerror = () => {
+          window.clearTimeout(watchdogId);
+          try {
+            setGenerationProgress('PS Engine fallback on main thread...');
+            const minT = Math.min(ssPsCustomMinTrim, ssPsCustomMaxTrim);
+            const maxT = Math.max(ssPsCustomMinTrim, ssPsCustomMaxTrim);
+            const result = generateSsJumboRequirementsViaPsEngine({
+              film: selectedFilm,
+              orders,
+              settings,
+              trimMode: ssPsTrimMode === 'CUSTOM' ? 'CUSTOM' : ssPsTrimMode,
+              customMinTrimMm: minT,
+              customMaxTrimMm: maxT,
+              createdBy: currentUser?.name,
+            });
+            if (!result.requirements.length) {
+              finishError(
+                result.stop_reason ||
+                  `PS Engine found no feasible plan for ${selectedFilm}.`
+              );
+            } else {
+              const reqs = result.requirements.map((r, i) => {
+                const plan = result.plans[i] || result.plans.find(p => p.id === (r as any).source_ps_plan_id);
+                if (plan) {
+                  cachePsEnginePlan(r.id, plan);
+                  return { ...r, source_ps_plan: plan, source_ps_plan_id: plan.id, source_ps_plan_number: plan.plan_number } as any;
+                }
+                return r;
+              });
+              applySynthesisResult(reqs as JumboRequirement[]);
+              setIsGenerating(false);
+              setGenerationProgress('');
+              setGenerationPercent(0);
+            }
+          } catch (err: any) {
+            finishError(err?.message || 'PS Engine synthesis failed.');
+          }
+          if (workerRef.current === worker) {
+            worker.terminate();
+            workerRef.current = null;
+          }
+        };
+
+        const minT = Math.min(ssPsCustomMinTrim, ssPsCustomMaxTrim);
+        const maxT = Math.max(ssPsCustomMinTrim, ssPsCustomMaxTrim);
+        worker.postMessage({
+          type: 'RUN_PS_ENGINE',
+          orders,
+          settings,
+          film: selectedFilm,
+          trimMode: ssPsTrimMode === 'CUSTOM' ? 'CUSTOM' : ssPsTrimMode,
+          customMinTrimMm: minT,
+          customMaxTrimMm: maxT,
+          createdBy: currentUser?.name,
+          filmSpecs: getFilmSpecsSnapshotForPlanning(),
+        });
+      } catch (err: any) {
+        finishError(err?.message || 'PS Engine worker failed to start.');
+      }
+      return;
+    }
+
+    // Apply active SS trim window (all films) into machine settings for this run
+    const trimMin = Math.min(ssPsCustomMinTrim, ssPsCustomMaxTrim);
+    const trimMax = Math.max(ssPsCustomMinTrim, ssPsCustomMaxTrim);
+    const settingsWithTrim = {
+      ...settings,
+      min_trim_mm: trimMin,
+      max_trim_mm: ssPsTrimMode === 'GREEN' ? Math.min(trimMax, 35) : trimMax,
+      hard_max_trim_mm: trimMax,
     };
 
     try {
@@ -356,7 +531,7 @@ export const SSJumboRequirementsView: React.FC<SSJumboRequirementsViewProps> = (
       worker.onerror = () => {
         // Fallback: same engine on main thread (keeps results identical)
         try {
-          const generated = generateSSJumboRollRequirements(orders, settings, selectedFilm);
+          const generated = generateSSJumboRollRequirements(orders, settingsWithTrim, selectedFilm);
           applySynthesisResult(generated);
         } catch (err: any) {
           finishError(err?.message || 'Synthesis encountered an issue. You can safely retry.');
@@ -370,12 +545,32 @@ export const SSJumboRequirementsView: React.FC<SSJumboRequirementsViewProps> = (
       worker.postMessage({
         type: 'RUN_SYNTHESIS',
         orders,
-        settings,
+        settings: settingsWithTrim,
         film: selectedFilm,
+        filmSpecs: getFilmSpecsSnapshotForPlanning(),
       });
+
+      // SYNTHESIS_WATCHDOG: never leave UI timer spinning forever
+      const watchdogId = window.setTimeout(() => {
+        if (workerRef.current === worker) {
+          worker.terminate();
+          workerRef.current = null;
+          finishError('Synthesis timed out (120s). Try a single film or fewer orders, then retry.');
+        }
+      }, 120000);
+      const prevOnMessage = worker.onmessage;
+      worker.onmessage = (e: MessageEvent<any>) => {
+        window.clearTimeout(watchdogId);
+        if (typeof prevOnMessage === 'function') prevOnMessage.call(worker, e);
+      };
+      const prevOnError = worker.onerror;
+      worker.onerror = (ev: ErrorEvent) => {
+        window.clearTimeout(watchdogId);
+        if (typeof prevOnError === 'function') prevOnError.call(worker, ev);
+      };
     } catch {
       try {
-        const generated = generateSSJumboRollRequirements(orders, settings, selectedFilm);
+        const generated = generateSSJumboRollRequirements(orders, settingsWithTrim, selectedFilm);
         applySynthesisResult(generated);
       } catch (err: any) {
         finishError(err?.message || 'Synthesis encountered an issue. You can safely retry.');
@@ -530,7 +725,12 @@ export const SSJumboRequirementsView: React.FC<SSJumboRequirementsViewProps> = (
 
     setIsGeneratingPs01(true);
     try {
-      const result = generatePS01ManufacturingPlansForJumbos(targetReqs, selectedFilm, currentUser?.name);
+      const result = generatePS01ManufacturingPlansForJumbos(
+        targetReqs,
+        selectedFilm,
+        currentUser?.name,
+        settings.ps01_deckle_width_mm
+      );
       setPs01ManufacturingModal({
         isOpen: true,
         plans: result.plans,
@@ -545,13 +745,24 @@ export const SSJumboRequirementsView: React.FC<SSJumboRequirementsViewProps> = (
     }
   };
 
-  const selectedCount = filteredReqs.filter(r => selectedReqIds.has(r.id)).length;
-  const selectedWeightKg = filteredReqs
-    .filter(r => selectedReqIds.has(r.id))
-    .reduce((sum, r) => sum + r.total_weight_kg, 0);
+  const selectedReqs = filteredReqs.filter(r => selectedReqIds.has(r.id));
+  const selectedCount = selectedReqs.length;
+  // Customer-allocated kg (orders_covered) preferred over mill total_weight_kg
+  const sumCoveredKg = (r: JumboRequirement) => {
+    const cov = (r.orders_covered || []).reduce((s, o) => s + (Number(o.weight_kg) || 0), 0);
+    return cov > 0.01 ? cov : (r.total_weight_kg || 0);
+  };
+  const selectedWeightKg = selectedReqs.reduce((sum, r) => sum + sumCoveredKg(r), 0);
+  const totalRequiredWeightKg = filteredReqs.reduce((sum, r) => sum + sumCoveredKg(r), 0);
 
-  const totalRequiredRolls = filteredReqs.reduce((sum, r) => sum + r.required_rolls_count, 0);
-  const totalRequiredWeightKg = filteredReqs.reduce((sum, r) => sum + r.total_weight_kg, 0);
+  // Rolls / packs: selected plans only; prefer ps_pack_count
+  const packOf = (r: JumboRequirement) =>
+    Number((r as any).ps_pack_count) ||
+    Number((r as any).source_ps_plan?.repetitions) ||
+    r.required_rolls_count ||
+    0;
+  const totalRequiredRolls = selectedReqs.reduce((sum, r) => sum + packOf(r), 0);
+  const totalRequiredPacks = totalRequiredRolls; // fixed-1705: 1 pack ≈ 1 jumbo
 
   const defaultPlannerUser: UserProfile = currentUser || {
     id: 'planner-msl-01',
@@ -573,25 +784,147 @@ export const SSJumboRequirementsView: React.FC<SSJumboRequirementsViewProps> = (
           </div>
           <h1 className="text-xl font-bold text-slate-900 mt-1">Jumbo Roll Requirement & Feasibility Planner</h1>
           <p className="text-xs text-slate-500">
-            Synthesizes 1–14 UPS finished slitting configurations with automated PS01 10,400mm mother deckle feasibility handshake
+            Synthesizes 1–14 UPS finished slitting configurations with PS01 mother deckle handshake (selectable deckle)
           </p>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex flex-wrap items-end gap-2">
+          {/* Control cluster — matches SS purple / slate language */}
+          <div className="flex flex-wrap items-end gap-2 rounded-xl border border-purple-100 bg-purple-50/60 px-2.5 py-2">
+            <div className="flex flex-col">
+              <label className="text-[9px] font-bold uppercase tracking-wider text-purple-700/80 mb-0.5">PS01 Deckle</label>
+              <select
+                value={String(settings.ps01_deckle_width_mm ?? 10400)}
+                disabled={isGenerating}
+                onChange={(e) => {
+                  e.stopPropagation();
+                  const val = Number(e.target.value);
+                  if (![10400, 10330, 8700, 8630].includes(val)) return;
+                  const next = { ...settings, ps01_deckle_width_mm: val, updated_at: new Date().toISOString() };
+                  saveStoredSSSettings(next);
+                  onSettingsSaved?.(next);
+                }}
+                className="h-9 px-3 bg-white border border-purple-200 hover:border-purple-300 rounded-lg text-xs font-mono font-bold text-slate-800 cursor-pointer disabled:opacity-50 min-w-[132px] focus:outline-none focus:ring-2 focus:ring-purple-300/50"
+                title="Mother deckle for jumbo synthesis"
+              >
+                {SS_PS01_DECKLE_OPTIONS.map(d => (
+                  <option key={d} value={String(d)}>{d.toLocaleString()} mm</option>
+                ))}
+              </select>
+            </div>
+
+            {psEngineFilmSelected && (
+              <div className="flex flex-col">
+                <label className="text-[9px] font-bold uppercase tracking-wider text-purple-700/80 mb-0.5">Planning Engine</label>
+                <select
+                  value={ssEngineMode}
+                  disabled={isGenerating}
+                  onChange={(e) =>
+                    setSsEngineMode(e.target.value === 'PS_ENGINE' ? 'PS_ENGINE' : 'SS_NATIVE')
+                  }
+                  className="h-9 px-3 bg-white border border-purple-200 hover:border-purple-300 rounded-lg text-xs font-semibold text-slate-800 cursor-pointer disabled:opacity-50 min-w-[148px] focus:outline-none focus:ring-2 focus:ring-purple-300/50"
+                  title="SS Native or PS Engine (1705 mm)"
+                >
+                  <option value="SS_NATIVE">SS Native</option>
+                  <option value="PS_ENGINE">PS Engine (1705 mm)</option>
+                </select>
+              </div>
+            )}
+
+            <div className="w-px self-stretch bg-purple-200/80 mx-0.5 hidden sm:block" />
+
+            <div className="flex flex-col">
+              <label className="text-[9px] font-bold uppercase tracking-wider text-purple-700/80 mb-0.5">Trim Window</label>
+              <select
+                value={ssPsTrimMode}
+                disabled={isGenerating}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  if (v === 'YELLOW') {
+                    setSsPsTrimMode('YELLOW');
+                    setSsPsCustomMinTrim(11);
+                    setSsPsCustomMaxTrim(45);
+                  } else if (v === 'CUSTOM') {
+                    setSsPsTrimMode('CUSTOM');
+                  } else {
+                    setSsPsTrimMode('GREEN');
+                    setSsPsCustomMinTrim(11);
+                    setSsPsCustomMaxTrim(35);
+                  }
+                }}
+                className="h-9 px-3 bg-white border border-purple-200 hover:border-purple-300 rounded-lg text-xs font-semibold text-slate-800 cursor-pointer disabled:opacity-50 min-w-[148px] focus:outline-none focus:ring-2 focus:ring-purple-300/50"
+                title="GREEN / YELLOW / CUSTOM — all SS films"
+              >
+                <option value="GREEN">GREEN 11–35</option>
+                <option value="YELLOW">YELLOW 11–45</option>
+                <option value="CUSTOM">CUSTOM</option>
+              </select>
+            </div>
+
+            <div className="flex flex-col">
+              <label className="text-[9px] font-bold uppercase tracking-wider text-purple-700/80 mb-0.5">Min</label>
+              <input
+                type="number"
+                min={0}
+                max={200}
+                step={1}
+                disabled={isGenerating}
+                value={ssPsCustomMinTrim}
+                onChange={(e) => {
+                  const n = Number(e.target.value);
+                  setSsPsCustomMinTrim(Number.isFinite(n) ? n : 0);
+                  if (ssPsTrimMode !== 'CUSTOM') setSsPsTrimMode('CUSTOM');
+                }}
+                className="h-9 px-2 bg-white border border-purple-200 hover:border-purple-300 rounded-lg text-xs font-mono font-bold text-slate-800 w-[72px] disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-purple-300/50"
+              />
+            </div>
+            <div className="flex flex-col">
+              <label className="text-[9px] font-bold uppercase tracking-wider text-purple-700/80 mb-0.5">Max</label>
+              <input
+                type="number"
+                min={0}
+                max={300}
+                step={1}
+                disabled={isGenerating}
+                value={ssPsCustomMaxTrim}
+                onChange={(e) => {
+                  const n = Number(e.target.value);
+                  setSsPsCustomMaxTrim(Number.isFinite(n) ? n : 35);
+                  if (ssPsTrimMode !== 'CUSTOM') setSsPsTrimMode('CUSTOM');
+                }}
+                className="h-9 px-2 bg-white border border-purple-200 hover:border-purple-300 rounded-lg text-xs font-mono font-bold text-slate-800 w-[72px] disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-purple-300/50"
+              />
+            </div>
+
+            <div className="flex items-center h-9 px-2 rounded-lg bg-purple-100/80 border border-purple-200">
+              <span className="text-[10px] font-mono font-bold text-purple-800 whitespace-nowrap">
+                {Math.min(ssPsCustomMinTrim, ssPsCustomMaxTrim)}–{Math.max(ssPsCustomMinTrim, ssPsCustomMaxTrim)} mm
+              </span>
+            </div>
+          </div>
+
           <button
             onClick={handleGenerate}
             disabled={isGenerating || filmOrders.length === 0}
-            className="flex items-center space-x-2 px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white text-xs font-semibold rounded-lg shadow-xs transition-colors cursor-pointer disabled:opacity-50"
+            className="flex items-center space-x-2 h-9 px-4 bg-purple-600 hover:bg-purple-500 text-white text-xs font-semibold rounded-lg shadow-xs transition-colors cursor-pointer disabled:opacity-50"
           >
             <Sparkles className={`w-4 h-4 ${isGenerating ? 'animate-spin text-purple-200' : ''}`} />
-            <span>{isGenerating ? 'Handshaking PS01...' : `Synthesize & Handshake (${selectedFilm})`}</span>
+            <span>
+              {isGenerating
+                ? ssEngineMode === 'PS_ENGINE' && psEngineFilmSelected
+                  ? 'PS Engine running...'
+                  : 'Handshaking PS01...'
+                : ssEngineMode === 'PS_ENGINE' && psEngineFilmSelected
+                  ? `PS Engine Plan (${selectedFilm})`
+                  : `Synthesize & Handshake (${selectedFilm})`}
+            </span>
           </button>
           
           {filteredReqs.length > 0 && (
             <button
               onClick={() => handleGeneratePS01Plan(filteredReqs)}
               disabled={isGeneratingPs01}
-              className="flex items-center space-x-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold rounded-lg shadow-xs transition-colors cursor-pointer disabled:opacity-50"
+              className="flex items-center space-x-2 h-9 px-4 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold rounded-lg shadow-xs transition-colors cursor-pointer disabled:opacity-50"
               title="Generate full PS01 manufacturing factory sheet for selected requirements"
             >
               <Send className={`w-4 h-4 text-indigo-200 ${isGeneratingPs01 ? 'animate-spin' : ''}`} />
@@ -601,7 +934,7 @@ export const SSJumboRequirementsView: React.FC<SSJumboRequirementsViewProps> = (
 
           <button
             onClick={onNavigateToStudio}
-            className="flex items-center space-x-2 px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold rounded-lg transition-colors cursor-pointer"
+            className="flex items-center space-x-2 h-9 px-4 bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold rounded-lg transition-colors cursor-pointer"
           >
             <span>Proceed to SS Studio</span>
             <ArrowRight className="w-4 h-4 ml-1 text-purple-400" />
@@ -662,7 +995,7 @@ export const SSJumboRequirementsView: React.FC<SSJumboRequirementsViewProps> = (
                   <span className="text-purple-300 font-mono text-xs">({generationPercent}%)</span>
                 </p>
                 <p className="text-purple-300 mt-0.5 text-xs">
-                  {generationProgress || 'Synthesizing multi-width patterns & evaluating 10,400mm PS01 deckles...'}
+                  {generationProgress || 'Synthesizing multi-width patterns & evaluating PS01 deckles...'}
                 </p>
               </div>
             </div>
@@ -775,7 +1108,7 @@ export const SSJumboRequirementsView: React.FC<SSJumboRequirementsViewProps> = (
           <div className="bg-slate-50 p-3 rounded-lg border border-slate-200">
             <span className="font-bold text-slate-600 block mb-1 text-[11px] uppercase">SS Planning Capability:</span>
             <span className="text-slate-700">
-              1–14 UPS available · GREEN 11–35mm / YELLOW 36–45mm trim · Max Dia 1000mm · 6" Paper Core
+              1–14 UPS · Trim GREEN/YELLOW presets or CUSTOM min–max (like PS) · Max Dia 1000mm · 6" Paper Core
             </span>
           </div>
         </div>
@@ -905,26 +1238,28 @@ export const SSJumboRequirementsView: React.FC<SSJumboRequirementsViewProps> = (
               </div>
 
               <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-xs">
-                <span className="text-xs font-bold uppercase tracking-wider text-slate-500">Physical Slit Trim</span>
-                <div className="text-2xl font-black text-slate-900 font-mono mt-1">
-                  {totalFilmDemandKg > 0 
-                    ? `${Math.max(0, totalRequiredWeightKg - totalFilmDemandKg).toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 })} KG`
+                <span className="text-xs font-bold uppercase tracking-wider text-slate-500">
+                  {totalRequiredWeightKg >= totalFilmDemandKg ? 'Over vs Demand' : 'Under vs Demand'}
+                </span>
+                <div className={`text-2xl font-black font-mono mt-1 ${totalRequiredWeightKg > totalFilmDemandKg * 1.10 + 0.5 ? 'text-rose-600' : 'text-slate-900'}`}>
+                  {totalFilmDemandKg > 0
+                    ? `${Math.abs(totalRequiredWeightKg - totalFilmDemandKg).toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 })} KG`
                     : '0.0 KG'}
                 </div>
                 <span className="text-[11px] text-slate-600 font-bold">
-                  {totalFilmDemandKg > 0 
-                    ? `${(((totalRequiredWeightKg - totalFilmDemandKg) / totalFilmDemandKg) * 100).toFixed(2)}% Physical Edge Trim`
+                  {totalFilmDemandKg > 0
+                    ? `${totalRequiredWeightKg >= totalFilmDemandKg ? '+' : '-'}${((Math.abs(totalRequiredWeightKg - totalFilmDemandKg) / totalFilmDemandKg) * 100).toFixed(2)}% vs demand · ceiling +10%`
                     : '0.00%'}
                 </span>
               </div>
 
               <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-xs">
-                <span className="text-xs font-bold uppercase tracking-wider text-slate-500">Approved Jumbo Rolls</span>
+                <span className="text-xs font-bold uppercase tracking-wider text-slate-500">Selected Jumbo / Packs</span>
                 <div className="text-2xl font-black text-indigo-700 font-mono mt-1">
-                  {totalRequiredRolls} <span className="text-xs font-normal text-slate-500 font-sans">Jumbo Rolls</span>
+                  {totalRequiredRolls} <span className="text-xs font-normal text-slate-500 font-sans">Rolls</span>
                 </div>
                 <span className="text-[11px] text-slate-600 font-bold font-mono">
-                  {greenReqCount} GREEN · {yellowReqCount} YELLOW · {redReqCount} RED
+                  {totalRequiredPacks} packs · {greenReqCount}G · {yellowReqCount}Y · {redReqCount}R
                 </span>
               </div>
             </div>
@@ -1150,13 +1485,13 @@ export const SSJumboRequirementsView: React.FC<SSJumboRequirementsViewProps> = (
               const feasibility = req.ps01_feasibility || {
                 status: 'GREEN' as const,
                 is_feasible: true,
-                ps01_deckle_mm: 10400,
+                ps01_deckle_mm: settings.ps01_deckle_width_mm ?? 10400,
                 jumbo_width_mm: req.required_jumbo_width_mm,
                 ps01_ups: 6,
                 ps01_cut_combination: Array(6).fill(req.required_jumbo_width_mm),
                 ps01_total_width_mm: req.required_jumbo_width_mm * 6,
-                ps01_trim_mm: Math.max(0, 10400 - (req.required_jumbo_width_mm * 6)),
-                ps01_deckle_efficiency_percent: Number((((req.required_jumbo_width_mm * 6) / 10400) * 100).toFixed(2)),
+                ps01_trim_mm: Math.max(0, (settings.ps01_deckle_width_mm ?? 10400) - (req.required_jumbo_width_mm * 6)),
+                ps01_deckle_efficiency_percent: Number((((req.required_jumbo_width_mm * 6) / (settings.ps01_deckle_width_mm ?? 10400)) * 100).toFixed(2)),
                 ps01_duplex_balanced: true,
                 side_a_ups: 3,
                 side_b_ups: 3,
@@ -1195,6 +1530,30 @@ export const SSJumboRequirementsView: React.FC<SSJumboRequirementsViewProps> = (
                   const cutCombination = feas.ps01_cut_combination || [feas.jumbo_width_mm];
                   const primaryReq = group.reqs[0]?.req;
 
+                  // Surgical: detect fixed-1705 films (MATTPL12 / TNBPL10) for PS-style aggregation
+                  const groupFilmKey = String(primaryReq?.film || '').trim().toUpperCase();
+                  const isFixed1705Group =
+                    (groupFilmKey === 'MATTPL12' || groupFilmKey === 'TNBPL10') &&
+                    (primaryReq?.required_jumbo_width_mm === 1705 || feas.jumbo_width_mm === 1705);
+                  const totalGroupRolls = group.reqs.reduce((s, g) => s + (g.req.required_rolls_count || 0), 0);
+                  const totalGroupKg = group.totalDeckleKg;
+                  const primaryJumboLen = primaryReq?.required_jumbo_length_m || 0;
+                  const primaryPackLen = (() => {
+                    const covered = (primaryReq?.orders_covered || []).map(o => o.length_m).filter(Boolean);
+                    return covered.length > 0
+                      ? Math.max(...covered)
+                      : Math.round(primaryJumboLen / Math.max(1, primaryReq?.package_multiple || 1));
+                  })();
+                  const totalGroupPacks = group.reqs.reduce((s, g) => {
+                    const psPacks = Number((g.req as any).ps_pack_count) || Number((g.req as any).source_ps_plan?.repetitions) || 0;
+                    if (psPacks > 0) return s + psPacks;
+                    const jLen = g.req.required_jumbo_length_m || 0;
+                    const cov = (g.req.orders_covered || []).map(o => o.length_m).filter(Boolean);
+                    const pLen = cov.length > 0 ? Math.max(...cov) : Math.round(jLen / Math.max(1, g.req.package_multiple || 1));
+                    const sets = pLen > 0 && jLen > 0 ? Math.max(1, Math.round(jLen / pLen)) : 1;
+                    return s + (g.req.required_rolls_count || 1) * sets;
+                  }, 0);
+
                   // Check how many plans in this group are selected
                   const groupSelectedCount = group.reqs.filter(g => selectedReqIds.has(g.req.id)).length;
                   const allGroupSelected = group.reqs.length > 0 && groupSelectedCount === group.reqs.length;
@@ -1231,7 +1590,7 @@ export const SSJumboRequirementsView: React.FC<SSJumboRequirementsViewProps> = (
                               </span>
 
                               <span className="text-sm font-bold text-slate-100">
-                                Mother Deckle: <span className="font-mono text-purple-300">10,400 mm</span>
+                                Mother Deckle: <span className="font-mono text-purple-300">{(feas.ps01_deckle_mm || settings.ps01_deckle_width_mm || 10400).toLocaleString()} mm</span>
                               </span>
 
                               <span className="text-xs text-slate-400 font-mono">
@@ -1279,6 +1638,40 @@ export const SSJumboRequirementsView: React.FC<SSJumboRequirementsViewProps> = (
                                 <span className="font-mono font-bold text-purple-300">{feas.ps01_deckle_efficiency_percent}%</span>
                               </div>
                             </div>
+
+                            {/* Surgical: PS-style aggregated jumbo summary for MATTPL12 / TNBPL10 */}
+                            {isFixed1705Group && (
+                              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs pt-2 mt-1 border-t border-slate-700/60">
+                                <div>
+                                  <span className="text-slate-400 font-semibold">Mount Jumbo: </span>
+                                  <span className="font-mono font-black text-purple-300">1705 mm</span>
+                                  <span className="text-slate-400"> ({groupFilmKey} – {primaryReq?.thickness_micron || 10}µm)</span>
+                                </div>
+                                <div className="h-3 w-px bg-slate-700 hidden sm:block" />
+                                <div>
+                                  <span className="text-slate-400 font-semibold">Total Jumbo Rolls: </span>
+                                  <span className="font-mono font-black text-emerald-300">{totalGroupRolls}</span>
+                                  <span className="text-slate-400"> ({totalGroupKg.toLocaleString()} kg)</span>
+                                </div>
+                                <div className="h-3 w-px bg-slate-700 hidden sm:block" />
+                                <div>
+                                  <span className="text-slate-400 font-semibold">Total Packs: </span>
+                                  <span className="font-mono font-black text-amber-300">{totalGroupPacks}</span>
+                                  {primaryPackLen > 0 && (
+                                    <span className="text-slate-400"> ({primaryPackLen.toLocaleString()} m each)</span>
+                                  )}
+                                </div>
+                                {primaryJumboLen > 0 && (
+                                  <>
+                                    <div className="h-3 w-px bg-slate-700 hidden sm:block" />
+                                    <div>
+                                      <span className="text-slate-400 font-semibold">Jumbo Length: </span>
+                                      <span className="font-mono font-bold text-slate-200">{primaryJumboLen.toLocaleString()} m</span>
+                                    </div>
+                                  </>
+                                )}
+                              </div>
+                            )}
                           </div>
 
                           {/* Upstream Factory Sheet & Group Selection Actions */}
@@ -1286,13 +1679,23 @@ export const SSJumboRequirementsView: React.FC<SSJumboRequirementsViewProps> = (
                             {primaryReq && (
                               <button
                                 onClick={() => {
-                                  const decklePlan = generatePS01PlanForDeckleGroup(
-                                    group.reqs.map(g => g.req),
-                                    group.runIndex,
-                                    selectedFilm,
-                                    currentUser?.name
-                                  );
-                                  setSelectedPlanForFactorySheet(decklePlan);
+                                  try {
+                                    const decklePlan = generatePS01PlanForDeckleGroup(
+                                      group.reqs.map(g => g.req),
+                                      group.runIndex,
+                                      selectedFilm || primaryReq.film,
+                                      currentUser?.name,
+                                      settings.ps01_deckle_width_mm
+                                    );
+                                    if (!decklePlan || !decklePlan.id) {
+                                      alert('Could not build PS01 Factory Sheet for this mother run.');
+                                      return;
+                                    }
+                                    setSelectedPlanForFactorySheet(decklePlan);
+                                  } catch (err: any) {
+                                    console.error('PS01 Factory Sheet error:', err);
+                                    alert(`PS01 Factory Sheet failed:\n${err?.message || String(err)}`);
+                                  }
                                 }}
                                 className="px-3 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg font-bold text-xs flex items-center space-x-1.5 transition-colors cursor-pointer shadow-sm"
                                 title={`Open official factory manufacturing sheet for PS01 Run #${group.runIndex}`}
@@ -1329,7 +1732,11 @@ export const SSJumboRequirementsView: React.FC<SSJumboRequirementsViewProps> = (
                           <div className="flex items-center space-x-2">
                             <span className="text-xs font-bold uppercase tracking-wider text-slate-700 flex items-center space-x-1.5">
                               <ArrowRight className="w-4 h-4 text-purple-600" />
-                              <span>Downstream Secondary Slitter Plans Fed by this Mother Roll:</span>
+                              <span>
+                                {isFixed1705Group
+                                  ? 'Downstream Secondary Slitter Plans (all patterns cut from the 1705 mm jumbos above):'
+                                  : 'Downstream Secondary Slitter Plans Fed by this Mother Roll:'}
+                              </span>
                             </span>
                             <span className="px-2 py-0.5 bg-purple-100 text-purple-800 text-[11px] font-bold rounded-full font-mono">
                               {group.reqs.length} SS Slit Plan{group.reqs.length > 1 ? 's' : ''}
@@ -1337,6 +1744,9 @@ export const SSJumboRequirementsView: React.FC<SSJumboRequirementsViewProps> = (
                           </div>
                           <span className="text-xs font-mono font-bold text-slate-600">
                             Total Yield: {group.totalDeckleKg.toLocaleString()} KG
+                            {isFixed1705Group && totalGroupRolls > 0 && (
+                              <span className="ml-2 text-purple-700">· {totalGroupRolls} Jumbo Rolls</span>
+                            )}
                           </span>
                         </div>
 
@@ -1353,7 +1763,59 @@ export const SSJumboRequirementsView: React.FC<SSJumboRequirementsViewProps> = (
                               ? Math.max(...coveredLengths)
                               : Math.round(jumboLen / Math.max(1, req.package_multiple || 1));
                             const setsPerJumbo = Math.max(1, Math.round(jumboLen / packLengthM));
-                            const totalPacks = (req.required_rolls_count || 1) * setsPerJumbo;
+
+                            // Prefer authoritative PS plan (sheet truth) for card KPIs
+                            const psPlan: any = (req as any).source_ps_plan || getCachedPsEnginePlan(req as any);
+                            const psItems: any[] = psPlan
+                              ? (psPlan.items?.length ? psPlan.items : (psPlan.segments?.[0]?.items || []))
+                              : [];
+                            const psPacksFromPlan = Number(psPlan?.repetitions) || 0;
+                            const psPacksCard =
+                              psPacksFromPlan ||
+                              Number((req as any).ps_pack_count) ||
+                              0;
+                            const totalPacks = psPacksCard > 0 ? psPacksCard : (req.required_rolls_count || 1) * setsPerJumbo;
+
+                            // Initial knife pattern = active (non-future) positions with UPS > 0
+                            let displayCuts: number[] = (req.finished_widths_covered || []).slice();
+                            let displayTrim = req.expected_trim_mm;
+                            let displayWeightKg = req.total_weight_kg;
+                            let displayOrders: { sales_order: any; customer: string; width_mm: number; weight_kg: number }[] =
+                              (req.orders_covered || []).map(o => ({
+                                sales_order: o.sales_order,
+                                customer: o.customer || '',
+                                width_mm: o.width_mm,
+                                weight_kg: o.weight_kg || 0,
+                              }));
+
+                            if (psPlan && psItems.length > 0) {
+                              const activeItems = psItems.filter(
+                                (it: any) => !it.is_future_replacement && (Number(it.ups) > 0 || Number(it.initial_ups) > 0)
+                              );
+                              const cutsFromActive: number[] = [];
+                              for (const it of activeItems) {
+                                const u = Math.max(1, Number(it.ups) || Number(it.initial_ups) || 1);
+                                for (let i = 0; i < u; i++) cutsFromActive.push(Number(it.width_mm));
+                              }
+                              if (cutsFromActive.length > 0) {
+                                displayCuts = cutsFromActive;
+                              } else if (Number(psPlan.deckle_mm) > 0 && Number(psPlan.trim_mm) >= 0) {
+                                // fallback: keep req pattern
+                              }
+                              if (psPlan.trim_mm != null && Number.isFinite(Number(psPlan.trim_mm))) {
+                                displayTrim = Number(psPlan.trim_mm);
+                              }
+                              if (psPlan.planned_quantity_kg != null && Number(psPlan.planned_quantity_kg) > 0) {
+                                displayWeightKg = Number(psPlan.planned_quantity_kg);
+                              }
+                              // Full customer list from PS plan items (same as sheet)
+                              displayOrders = psItems.map((it: any) => ({
+                                sales_order: it.sales_order,
+                                customer: it.customer || '',
+                                width_mm: Number(it.width_mm) || 0,
+                                weight_kg: Number(it.total_weight_kg) || 0,
+                              }));
+                            }
 
                             return (
                               <div
@@ -1395,18 +1857,28 @@ export const SSJumboRequirementsView: React.FC<SSJumboRequirementsViewProps> = (
                                       <span className="px-2 py-0.5 text-xs font-bold rounded-md bg-purple-100 text-purple-800 font-mono">
                                         SS PLAN #{originalIndex + 1}
                                       </span>
-                                      <span className="font-bold text-slate-900 text-sm">
-                                        Mount Jumbo: <span className="text-purple-700 font-mono font-black">{req.required_jumbo_width_mm} mm</span> ({req.film} - {req.thickness_micron}µm)
-                                      </span>
+                                      {/* Surgical: for fixed-1705 films, mother header already owns Mount Jumbo + total rolls */}
+                                      {!isFixed1705Group && (
+                                        <span className="font-bold text-slate-900 text-sm">
+                                          Mount Jumbo: <span className="text-purple-700 font-mono font-black">{req.required_jumbo_width_mm} mm</span> ({req.film} - {req.thickness_micron}µm)
+                                        </span>
+                                      )}
                                       <span className="px-2 py-0.5 text-[11px] font-semibold bg-purple-50 text-purple-700 rounded border border-purple-200">
-                                        {req.ups}-UPS SS Pattern
+                                        {(displayCuts.length || req.ups)}-UPS SS Pattern
                                       </span>
                                       <span className="text-xs font-mono text-purple-800 bg-purple-50 border border-purple-200 px-2 py-0.5 rounded font-bold">
                                         <b>{totalPacks}</b> Packs ({packLengthM.toLocaleString()} m each)
                                       </span>
-                                      <span className="text-xs font-mono text-slate-600 bg-slate-100 px-2 py-0.5 rounded">
-                                        <b>{req.required_rolls_count}</b> Jumbo Roll{req.required_rolls_count > 1 ? 's' : ''} ({req.total_weight_kg.toLocaleString()} kg)
-                                      </span>
+                                      {/* For fixed-1705 show pattern share only; total rolls live on mother header */}
+                                      {isFixed1705Group ? (
+                                        <span className="text-xs font-mono text-slate-600 bg-slate-100 px-2 py-0.5 rounded">
+                                          <b>{displayWeightKg.toLocaleString()}</b> kg{psPlan ? '' : ' (pattern share)'}
+                                        </span>
+                                      ) : (
+                                        <span className="text-xs font-mono text-slate-600 bg-slate-100 px-2 py-0.5 rounded">
+                                          <b>{req.required_rolls_count}</b> Jumbo Roll{req.required_rolls_count > 1 ? 's' : ''} ({req.total_weight_kg.toLocaleString()} kg)
+                                        </span>
+                                      )}
                                     </div>
                                   </div>
 
@@ -1422,15 +1894,19 @@ export const SSJumboRequirementsView: React.FC<SSJumboRequirementsViewProps> = (
                                         <span className="text-slate-400 text-[10px] block font-sans uppercase font-bold">Total Packs</span>
                                         <span className="font-bold text-purple-700">{totalPacks} Packs</span>
                                       </div>
-                                      <div className="h-4 w-px bg-slate-200" />
-                                      <div>
-                                        <span className="text-slate-400 text-[10px] block font-sans uppercase font-bold">Jumbo Roll</span>
-                                        <span className="font-bold text-slate-800">{req.required_rolls_count} Roll{req.required_rolls_count > 1 ? 's' : ''} ({jumboLen.toLocaleString()} m)</span>
-                                      </div>
+                                      {!isFixed1705Group && (
+                                        <>
+                                          <div className="h-4 w-px bg-slate-200" />
+                                          <div>
+                                            <span className="text-slate-400 text-[10px] block font-sans uppercase font-bold">Jumbo Roll</span>
+                                            <span className="font-bold text-slate-800">{req.required_rolls_count} Roll{req.required_rolls_count > 1 ? 's' : ''} ({jumboLen.toLocaleString()} m)</span>
+                                          </div>
+                                        </>
+                                      )}
                                       <div className="h-4 w-px bg-slate-200" />
                                       <div>
                                         <span className="text-slate-400 text-[10px] block font-sans uppercase font-bold">SS Trim</span>
-                                        <span className="font-bold text-purple-700">{req.expected_trim_mm} mm</span>
+                                        <span className="font-bold text-purple-700">{displayTrim} mm</span>
                                       </div>
                                       <div className="h-4 w-px bg-slate-200" />
                                       <div>
@@ -1446,7 +1922,7 @@ export const SSJumboRequirementsView: React.FC<SSJumboRequirementsViewProps> = (
                                         title={`View full SS Slitter Production Sheet for Plan #${originalIndex + 1}`}
                                       >
                                         <FileSpreadsheet className="w-3.5 h-3.5" />
-                                        <span>View SS Sheet #{originalIndex + 1}</span>
+                                        <span>{(req as any).source_ps_plan ? `View PS Plan Sheet #${originalIndex + 1}` : `View SS Sheet #${originalIndex + 1}`}</span>
                                       </button>
 
                                       <button
@@ -1491,7 +1967,7 @@ export const SSJumboRequirementsView: React.FC<SSJumboRequirementsViewProps> = (
                                       SS Slit Knife Cuts:
                                     </h5>
                                     <div className="flex flex-wrap items-center gap-1.5">
-                                      {(req.finished_widths_covered || []).map((w, wIdx) => (
+                                      {displayCuts.map((w, wIdx) => (
                                         <div key={wIdx} className="bg-slate-100 border border-slate-200 px-2.5 py-1 rounded-md flex items-center space-x-1.5">
                                           <span className="text-slate-400 font-mono text-[10px]">Pos {wIdx + 1}:</span>
                                           <span className="font-mono font-bold text-slate-900">{w} mm</span>
@@ -1499,7 +1975,7 @@ export const SSJumboRequirementsView: React.FC<SSJumboRequirementsViewProps> = (
                                       ))}
                                       <div className="bg-purple-50 border border-purple-200 px-2.5 py-1 rounded-md flex items-center space-x-1 text-purple-800">
                                         <span className="text-[10px] font-semibold uppercase">Trim:</span>
-                                        <span className="font-mono font-bold">{req.expected_trim_mm} mm</span>
+                                        <span className="font-mono font-bold">{displayTrim} mm</span>
                                       </div>
                                     </div>
                                   </div>
@@ -1508,11 +1984,11 @@ export const SSJumboRequirementsView: React.FC<SSJumboRequirementsViewProps> = (
                                     <h5 className="font-bold text-slate-600 mb-1.5 uppercase text-[10px] tracking-wider">
                                       Customer Orders Covered:
                                     </h5>
-                                    <div className="space-y-1 max-h-20 overflow-y-auto pr-1">
-                                      {(req.orders_covered || []).map((o, oIdx) => (
+                                    <div className="space-y-1 max-h-40 overflow-y-auto pr-1">
+                                      {displayOrders.map((o, oIdx) => (
                                         <div key={oIdx} className="flex items-center justify-between text-slate-600 bg-slate-50 px-2 py-0.5 rounded text-[11px]">
                                           <span className="truncate max-w-[220px]">
-                                            <b className="text-slate-900 font-mono">SO#{o.sales_order}</b> ({o.customer}) - {o.width_mm}mm
+                                            <b className="text-slate-900 font-mono">SO#{String(o.sales_order || '').replace(/^SO#/i, '')}</b> ({o.customer}) - {o.width_mm}mm
                                           </span>
                                           <span className="font-mono font-bold text-purple-700 shrink-0">
                                             {(o.weight_kg || 0).toLocaleString()} kg
@@ -1790,7 +2266,7 @@ export const SSJumboRequirementsView: React.FC<SSJumboRequirementsViewProps> = (
                           </span>
                         </div>
                         <h3 className="text-sm font-bold text-white mt-1">
-                          Mother Roll Deckle: 10,400 mm · Jumbo Width: <span className="text-purple-300 font-mono font-black">{p.items?.[0]?.width_mm ?? p.deckle_mm} mm</span> ({p.ups}-UPS Pattern)
+                          Mother Roll Deckle: {(p.deckle_mm || settings.ps01_deckle_width_mm || 10400).toLocaleString()} mm · Jumbo Width: <span className="text-purple-300 font-mono font-black">{p.items?.[0]?.width_mm ?? p.deckle_mm} mm</span> ({p.ups}-UPS Pattern)
                         </h3>
                       </div>
 

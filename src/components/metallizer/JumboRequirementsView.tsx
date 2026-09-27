@@ -1,3 +1,4 @@
+import { getFilmSpecsSnapshotForPlanning } from '../../services/stuffing/filmDensities';
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
   Sparkles, 
@@ -41,8 +42,7 @@ import {
   saveStoredJumboRequirements, 
   getStoredJumboRolls, 
   saveStoredJumboRolls,
-  getStoredMetallizerPlans
-} from '../../services/metallizer/metallizerStorage';
+  getStoredMetallizerPlans, saveStoredMetallizerSettings } from '../../services/metallizer/metallizerStorage';
 import { 
   generatePS01PlanForSingleJumbo,
   generatePS01PlanForDeckleGroup,
@@ -69,6 +69,7 @@ interface JumboRequirementsViewProps {
   onRequirementsUpdated: (reqs: JumboRequirement[]) => void;
   onJumboRollsUpdated?: (rolls: JumboRoll[]) => void;
   onNavigateToStudio: () => void;
+  onSettingsSaved?: (settings: MetallizerMachineSettings) => void;
 }
 
 export const JumboRequirementsView: React.FC<JumboRequirementsViewProps> = ({
@@ -81,6 +82,7 @@ export const JumboRequirementsView: React.FC<JumboRequirementsViewProps> = ({
   onRequirementsUpdated,
   onJumboRollsUpdated,
   onNavigateToStudio,
+  onSettingsSaved,
 }) => {
   // Filter metallized orders (strictly Film Code contains "MZ")
   const metallizedOrders = orders.filter(o => isMetallizerOrder(o));
@@ -323,7 +325,7 @@ export const JumboRequirementsView: React.FC<JumboRequirementsViewProps> = ({
     setWasCancelled(false);
     setErrorState(null);
     setGenerationPercent(15);
-    setGenerationProgress('Synthesizing 1–6 UPS combinations & evaluating 10,400mm PS01 deckles...');
+    setGenerationProgress('Synthesizing 1–6 UPS combinations & evaluating PS01 deckles...');
 
     if (workerRef.current) {
       workerRef.current.terminate();
@@ -376,7 +378,27 @@ export const JumboRequirementsView: React.FC<JumboRequirementsViewProps> = ({
         orders,
         settings,
         film: selectedFilm,
+        filmSpecs: getFilmSpecsSnapshotForPlanning(),
       });
+
+      // SYNTHESIS_WATCHDOG: never leave UI timer spinning forever
+      const watchdogId = window.setTimeout(() => {
+        if (workerRef.current === worker) {
+          worker.terminate();
+          workerRef.current = null;
+          finishError('Synthesis timed out (120s). Try a single film or fewer orders, then retry.');
+        }
+      }, 120000);
+      const prevOnMessage = worker.onmessage;
+      worker.onmessage = (e: MessageEvent<any>) => {
+        window.clearTimeout(watchdogId);
+        if (typeof prevOnMessage === 'function') prevOnMessage.call(worker, e);
+      };
+      const prevOnError = worker.onerror;
+      worker.onerror = (ev: ErrorEvent) => {
+        window.clearTimeout(watchdogId);
+        if (typeof prevOnError === 'function') prevOnError.call(worker, ev);
+      };
     } catch {
       try {
         const generated = generateJumboRollRequirements(orders, settings, selectedFilm);
@@ -581,7 +603,7 @@ export const JumboRequirementsView: React.FC<JumboRequirementsViewProps> = ({
           </div>
           <h1 className="text-xl font-bold text-slate-900 mt-1">Jumbo Roll Requirement & Feasibility Planner</h1>
           <p className="text-xs text-slate-500">
-            Synthesizes 1–6 UPS finished slitting configurations with automated PS01 10,400mm mother deckle feasibility handshake
+            Synthesizes 1–6 UPS finished slitting configurations with PS01 mother deckle feasibility handshake (deckle from Machine Parameters)
           </p>
         </div>
 
@@ -670,7 +692,7 @@ export const JumboRequirementsView: React.FC<JumboRequirementsViewProps> = ({
                   <span className="text-purple-300 font-mono text-xs">({generationPercent}%)</span>
                 </p>
                 <p className="text-purple-300 mt-0.5 text-xs">
-                  {generationProgress || 'Synthesizing multi-width patterns & evaluating 10,400mm PS01 deckles...'}
+                  {generationProgress || 'Synthesizing multi-width patterns & evaluating PS01 deckles...'}
                 </p>
               </div>
             </div>
@@ -1158,13 +1180,13 @@ export const JumboRequirementsView: React.FC<JumboRequirementsViewProps> = ({
               const feasibility = req.ps01_feasibility || {
                 status: 'GREEN' as const,
                 is_feasible: true,
-                ps01_deckle_mm: 10400,
+                ps01_deckle_mm: settings.ps01_deckle_width_mm ?? 10400,
                 jumbo_width_mm: req.required_jumbo_width_mm,
                 ps01_ups: req.required_jumbo_width_mm <= 2600 ? 4 : 3,
                 ps01_cut_combination: [req.required_jumbo_width_mm, req.required_jumbo_width_mm, req.required_jumbo_width_mm],
                 ps01_total_width_mm: req.required_jumbo_width_mm * 3,
-                ps01_trim_mm: Math.max(0, 10400 - (req.required_jumbo_width_mm * 3)),
-                ps01_deckle_efficiency_percent: Number((((req.required_jumbo_width_mm * 3) / 10400) * 100).toFixed(2)),
+                ps01_trim_mm: Math.max(0, (settings.ps01_deckle_width_mm ?? 10400) - (req.required_jumbo_width_mm * 3)),
+                ps01_deckle_efficiency_percent: Number((((req.required_jumbo_width_mm * 3) / (settings.ps01_deckle_width_mm ?? 10400)) * 100).toFixed(2)),
                 ps01_duplex_balanced: true,
                 side_a_ups: 2,
                 side_b_ups: 1,
@@ -1172,15 +1194,23 @@ export const JumboRequirementsView: React.FC<JumboRequirementsViewProps> = ({
                 explanation: `PS01 Deckle Run ([${req.required_jumbo_width_mm}] mm pattern)`
               };
 
-              const cutsKey = (feasibility.ps01_cut_combination || [req.required_jumbo_width_mm]).join('-');
-              const groupKey = req.ps01_parent_deckle_id || `deckle-${cutsKey}`;
+              // Group by physical mother pattern (not iterative ps01-run-N id)
+              // so identical 3405×3 GREEN runs collapse into ONE upstream mother run.
+              const cutsArr = (feasibility.ps01_cut_combination || [req.required_jumbo_width_mm]).slice().sort((a, b) => a - b);
+              const cutsKey = cutsArr.join('-');
+              const motherDeckle = feasibility.ps01_deckle_mm || settings.ps01_deckle_width_mm || 10400;
+              const groupKey = [
+                req.film || selectedFilm || '',
+                motherDeckle,
+                cutsKey,
+                req.required_jumbo_length_m || 0,
+              ].join('|');
 
               let group = groupMap.get(groupKey);
               if (!group) {
-                const runIdx = req.ps01_run_index || (deckleGroups.length + 1);
                 group = {
                   deckleKey: groupKey,
-                  runIndex: runIdx,
+                  runIndex: deckleGroups.length + 1,
                   feasibility,
                   reqs: [],
                   totalDeckleKg: 0,
@@ -1239,7 +1269,7 @@ export const JumboRequirementsView: React.FC<JumboRequirementsViewProps> = ({
                               </span>
 
                               <span className="text-sm font-bold text-slate-100">
-                                Mother Deckle: <span className="font-mono text-purple-300">10,400 mm</span>
+                                Mother Deckle: <span className="font-mono text-purple-300">{(feas.ps01_deckle_mm || settings.ps01_deckle_width_mm || 10400).toLocaleString()} mm</span>
                               </span>
 
                               <span className="text-xs text-slate-400 font-mono">
@@ -1803,7 +1833,7 @@ export const JumboRequirementsView: React.FC<JumboRequirementsViewProps> = ({
                           </span>
                         </div>
                         <h3 className="text-sm font-bold text-white mt-1">
-                          Mother Roll Deckle: 10,400 mm · Jumbo Width: <span className="text-purple-300 font-mono font-black">{p.items?.[0]?.width_mm ?? p.deckle_mm} mm</span> ({p.ups}-UPS Pattern)
+                          Mother Roll Deckle: {(p.deckle_mm || settings.ps01_deckle_width_mm || 10400).toLocaleString()} mm · Jumbo Width: <span className="text-purple-300 font-mono font-black">{p.items?.[0]?.width_mm ?? p.deckle_mm} mm</span> ({p.ups}-UPS Pattern)
                         </h3>
                       </div>
 

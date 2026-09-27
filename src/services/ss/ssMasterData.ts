@@ -1,12 +1,17 @@
 import { SSMachineSettings, SSJumboRoll, MetallizerMachineSettings, JumboRoll } from '../../types/ss';
 
+/** Selectable PS01 mother deckles for SS jumbo-roll synthesis (trim window unchanged). */
+export const SS_PS01_DECKLE_OPTIONS = [10400, 10330, 8700, 8630] as const;
+export type SSPs01DeckleOption = (typeof SS_PS01_DECKLE_OPTIONS)[number];
+
 export const DEFAULT_SS_SETTINGS: SSMachineSettings = {
   id: 'ss-settings-01',
   machine_name: 'Secondary Slitter',
-  physical_ups: 14,
+  physical_ups: 20,
   preferred_ups: 6,
-  max_planning_ups: 14,
-  max_jumbo_width_mm: 1720,
+  max_planning_ups: 20,
+  max_jumbo_width_mm: 1730,
+  ps01_deckle_width_mm: 10400,
   max_jumbo_diameter_mm: 1000,
   min_trim_mm: 11,   // GREEN zone lower bound
   max_trim_mm: 35,   // GREEN zone upper bound

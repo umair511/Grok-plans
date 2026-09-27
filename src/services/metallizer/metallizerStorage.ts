@@ -52,7 +52,18 @@ const setStorageItem = (key: string, value: string): void => {
 export function getStoredMetallizerSettings(): MetallizerMachineSettings {
   try {
     const raw = getStorageItem(METALLIZER_STORAGE_KEYS.SETTINGS);
-    if (raw) return JSON.parse(raw);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      // Merge defaults: allow_4_ups defaults to false (3-UPS only) unless planner enabled it
+      return {
+        ...DEFAULT_METALLIZER_SETTINGS,
+        ...parsed,
+        allow_4_ups: parsed.allow_4_ups === true,
+        ps01_deckle_width_mm: Number(parsed.ps01_deckle_width_mm) > 0
+          ? Number(parsed.ps01_deckle_width_mm)
+          : DEFAULT_METALLIZER_SETTINGS.ps01_deckle_width_mm,
+      };
+    }
     saveStoredMetallizerSettings(DEFAULT_METALLIZER_SETTINGS);
   } catch (e) {
     console.error('Error reading metallizer settings:', e);

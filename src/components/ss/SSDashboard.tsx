@@ -64,7 +64,7 @@ export const SSDashboard: React.FC<SSDashboardProps> = ({
         <div className="space-y-1">
           <div className="flex items-center space-x-3">
             <span className="px-2.5 py-1 text-xs font-bold rounded-md bg-purple-950 text-purple-300 border border-purple-800">SECONDARY SLITTER (SS)</span>
-            <span className="text-xs text-slate-400 font-mono">6" Paper Core · Max 1720mm Deckle · Max 1000mm Dia</span>
+            <span className="text-xs text-slate-400 font-mono">6" Paper Core · Max 1730mm Deckle · Max 1000mm Dia</span>
           </div>
           <h1 className="text-2xl font-bold text-white tracking-tight">Secondary Slitter (SS) Intelligent Operations</h1>
           <p className="text-sm text-slate-400">

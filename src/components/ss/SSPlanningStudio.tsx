@@ -1,3 +1,4 @@
+import { getFilmSpecsSnapshotForPlanning } from '../../services/stuffing/filmDensities';
 import React, { useState, useEffect, useRef } from 'react';
 import { 
   Cpu, 
@@ -204,6 +205,7 @@ export const SSPlanningStudio: React.FC<SSPlanningStudioProps> = ({
         settings,
         film: selectedFilm,
         requirements,
+        filmSpecs: getFilmSpecsSnapshotForPlanning(),
       });
     } catch {
       try {

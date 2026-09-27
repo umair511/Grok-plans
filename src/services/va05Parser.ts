@@ -1,11 +1,12 @@
 /**
  * SAP VA05 Orders File Parser & Validator
- * Supports .xlsx, .xls, .csv without artificial limits
+ * Supports factory Planning Sheet (.xlsm/.xlsx) + SAP VA05 + .csv\n * Canonical headers: Sales Order #, Item #, Film Code, Width (mm), Length (m), Core ID, TS / MTS, Bal QtY, Order Qty
  * Strict Implementation of SRS Sections 11, 12, 13, 14
  */
 
 import * as XLSX from 'xlsx';
 import { VA05Order, ImportBatch } from '../types';
+import { lookupFilmSpecs } from './stuffing/filmDensities';
 
 export interface ParseResult {
   batch: ImportBatch;
@@ -89,8 +90,10 @@ export function extractNormalizedFilmGrade(
   rowThickness?: number
 ): { film: string; thickness: number; density: number; description: string } {
   const film = (materialRaw || '').trim() || (materialDesc || '').trim() || 'TNO20';
-  const thickness = extractGaugeFromCodeOrDesc(film, materialDesc, rowThickness);
-  const density = 0.91;
+  const specs = lookupFilmSpecs(film);
+  const thickness = specs?.thickness || extractGaugeFromCodeOrDesc(film, materialDesc, rowThickness);
+  // Density ONLY from Film Specs Master DB (or explicit row later). Never invent 0.91.
+  const density = specs?.density && specs.density > 0 ? specs.density : 0;
   const description = (materialDesc || '').trim() || `${film} BOPP Film ${thickness}µ`;
 
   return {
@@ -156,72 +159,95 @@ export function parseVA05RawRows(
   rawRows.forEach((row, idx) => {
     const rowNum = idx + 2;
 
-    // Flexible column resolution supporting all SAP VA05 export styles
+    // Column resolution — FACTORY PLANNING SHEET headers are PRIMARY (canonical upload format).
+    // Legacy SAP VA05 / SHEET.xlsx aliases remain as fallbacks.
+    // Factory headers: Sales Order # | Item # | Film Code | Width (mm) | Length (m) |
+    //   Core ID | TS / MTS | Bal QtY | Order Qty | Customer | Created On | Delivery Date | ...
     const so = String(
-      getColumnValue(row, ['Sales Document', 'Sales Order', 'SO#', 'SO', 'Sales_Doc', 'Sales Doc', 'SD Document', 'Document', 'Sales Doc.'])
+      getColumnValue(row, [
+        // Factory planning sheet
+        'Sales Order #', 'Sales Order#', 'Sales Order',
+        // Legacy VA05 / exports
+        'Sales Document', 'SO#', 'SO', 'SO no', 'SO No', 'SO Number', 'SOno',
+        'Sales_Doc', 'Sales Doc', 'SD Document', 'Document', 'Sales Doc.', 'ClientCode'
+      ])
     ).trim();
 
     const rawItem = getColumnValue(row, [
-      'Sales Document Item',
-      'Sales Item',
-      'Item Number',
-      'Item_Number',
-      'Item#',
-      'Item',
-      'Line',
-      'Pos',
-      'Sales'
+      // Factory
+      'Item    #', 'Item #', 'Item#',
+      // Legacy
+      'Sales Document Item', 'Sales Item', 'Item Number', 'Item_Number', 'Item', 'Line', 'Pos', 'Sales'
     ]);
     const item = parseInt(String(rawItem || '10'), 10);
 
     const customer = String(
-      getColumnValue(row, ['Ship to Party', 'Customer', 'Sold to Party', 'Customer Name', 'Ship-to party', 'Sold-to party', 'Name', 'Party Name']) || 'Unknown Customer'
+      getColumnValue(row, [
+        'Customer', 'Ship to Party', 'Sold to Party', 'Customer Name',
+        'Ship-to party', 'Sold-to party', 'Name', 'Party Name'
+      ]) || 'Unknown Customer'
     ).trim();
 
-    // Source Material / Film Code column
+    // Film Code — factory primary; preserve EXACT characters from source
     const rawMaterial = String(
       getColumnValue(row, [
-        'Material',
-        'Material Code',
-        'Material Number',
-        'Material#',
-        'Material_Number',
-        'Material entered',
-        'Material Entered',
-        'Film Code',
-        'Film',
-        'Film Grade',
-        'Grade',
-        'Item Code'
+        'Film Code', 'Film', 'Film Grade',
+        'Material', 'Material Code', 'Material Number', 'Material#', 'Material_Number',
+        'Material entered', 'Material Entered', 'Grade', 'Item Code'
       ])
     ).trim();
 
     const materialDesc = String(
-      getColumnValue(row, ['Material Description', 'Description', 'Material Desc', 'Material Text', 'Item Description', 'Short Text'])
+      getColumnValue(row, [
+        'Codes For Summary', 'Material Description', 'Description',
+        'Material Desc', 'Material Text', 'Item Description', 'Short Text'
+      ])
     ).trim();
 
     const parsedThickness = parseFloat(
       String(getColumnValue(row, ['Thickness', 'Thickness (micron)', 'Micron', 'Gauge', 'THK', 'Thickness(um)', 'Thickness (um)', 'Thickness(µm)']))
     );
 
-    // CRITICAL: Film Code is preserved EXACTLY character-for-character as present in the VA05 source file
     const filmCode = rawMaterial || materialDesc || 'TNO20';
     const thickness = extractGaugeFromCodeOrDesc(filmCode, materialDesc, isNaN(parsedThickness) ? undefined : parsedThickness);
-    
-    // SAP Density - read directly from SAP row if present, else standard BOPP 0.91
-    const parsedDensity = parseFloat(String(getColumnValue(row, ['Density', 'Specific Gravity', 'Film Density']) || ''));
-    const density = (!isNaN(parsedDensity) && parsedDensity > 0) ? parsedDensity : 0.91;
 
-    const width = parseFloat(String(getColumnValue(row, ['Width', 'Size', 'Width (mm)', 'Width(mm)', 'Width mm', 'Slit Width']) || '0'));
-    const length = parseFloat(String(getColumnValue(row, ['Length', 'Length (m)', 'Length(m)', 'Length m', 'Reel Length', 'Standard Length']) || '19500'));
-    const coreVal = parseInt(String(getColumnValue(row, ['Core', 'Core (inch)', 'Core Size', 'Core Dia']) || '6'), 10);
+    const parsedDensity = parseFloat(String(getColumnValue(row, ['Density', 'Specific Gravity', 'Film Density']) || ''));
+    const specsLookup = lookupFilmSpecs(filmCode);
+    // Priority: sheet Density column → Film Specs Master DB → 0 (missing = must add in Film Specs)
+    const density = (!isNaN(parsedDensity) && parsedDensity > 0)
+      ? parsedDensity
+      : (specsLookup?.density && specsLookup.density > 0 ? specsLookup.density : 0);
+
+    const width = parseFloat(String(getColumnValue(row, [
+      // Factory (may include newline in header: "Width\n(mm)")
+      'Width  (mm)', 'Width (mm)', 'Width\n(mm)', 'Width(mm)', 'Width mm', 'Width',
+      'Size', 'Slit Width'
+    ]) || '0'));
+    const length = parseFloat(String(getColumnValue(row, [
+      'Length  (m)', 'Length (m)', 'Length(m)', 'Length m', 'Length',
+      'Reel Length', 'Standard Length'
+    ]) || '19500'));
+    const coreVal = parseInt(String(getColumnValue(row, [
+      'Core ID', 'CoreId', 'Core', 'Core (inch)', 'Core Size', 'Core Dia'
+    ]) || '6'), 10);
     const core = coreVal === 3 ? 3 : 6;
-    
-    const treatmentRaw = String(getColumnValue(row, ['Treatment Side', 'TS', 'Treatment', 'Corona Treatment', 'Corona']) || 'OS').toUpperCase();
+
+    const treatmentRaw = String(getColumnValue(row, [
+      'TS / MTS', 'TS/MTS', 'TS', 'MTS', 'Treatment Side', 'Treatment', 'Corona Treatment', 'Corona'
+    ]) || 'OS').toUpperCase();
     const treatmentSide = (treatmentRaw.includes('IN') || treatmentRaw.includes('IS') ? 'IS' : 'OS') as 'OS' | 'IS';
 
-    const balanceQty = parseFloat(String(getColumnValue(row, ['Balance Qty', 'Balance Quantity', 'Remaining Qty', 'Open Qty', 'Open Quantity', 'Balance (KG)', 'Balance KG', 'Order', 'Quantity']) || '0'));
-    const orderedQty = parseFloat(String(getColumnValue(row, ['Ordered Qty', 'Order Qty', 'Order Quantity', 'Target Qty', 'Target Quantity', 'Order', 'Balance Qty']) || balanceQty || '0'));
+    const balanceQty = parseFloat(String(getColumnValue(row, [
+      // Factory
+      'Bal QtY', 'Bal Qty', 'Bal. Qty', 'BalQty',
+      // Legacy
+      'Balance Qty', 'Balance Quantity', 'Remaining Qty',
+      'Open Qty', 'Open Quantity', 'Balance (KG)', 'Balance KG', 'Order', 'Quantity'
+    ]) || '0'));
+    const orderedQty = parseFloat(String(getColumnValue(row, [
+      'Order Qty', 'OrderQty', 'Ordered Qty', 'Order Quantity',
+      'Target Qty', 'Target Quantity', 'Order', 'Balance Qty', 'Bal Qty', 'Bal QtY'
+    ]) || balanceQty || '0'));
 
     if (!so) {
       errors.push(`Row ${rowNum}: Missing Sales Document / SO#.`);
@@ -272,12 +298,23 @@ export function parseVA05RawRows(
       plant: String(getColumnValue(row, ['Plant', 'Plnt', 'Manufacturing Plant']) || '3100'),
       priority: false,
       status: 'PENDING',
-      delivery_date: formatSAPDate(getColumnValue(row, ['Delivery Date', 'Deliv. Date', 'Req. Deliv. Date', 'First Deliv. Date', 'Schedule Date'])),
-      customer_reference: String(getColumnValue(row, ['Customer Reference (Header)', 'PO#', 'PO Number', 'Purchase Order', 'Cust Ref', 'Customer Ref', 'Cust. Ref.', 'Reference']) || ''),
+      delivery_date: formatSAPDate(getColumnValue(row, [
+        'Delivery Date', 'Deliv. Date', 'Req. Deliv. Date', 'Req/Com Date', 'First Deliv. Date', 'Schedule Date'
+      ])),
+      customer_reference: String(getColumnValue(row, [
+        'PO #', 'PO#', 'PO Number', 'Purchase Order',
+        'Customer Reference (Header)', 'Cust Ref', 'Customer Ref', 'Cust. Ref.', 'Reference'
+      ]) || ''),
       created_on: formatSAPDate(getColumnValue(row, ['Created On', 'Doc. Date', 'Document Date', 'Creation Date'])),
-      sales_person: String(getColumnValue(row, ['Sales person Name', 'Salesperson', 'Sales Person', 'Representative']) || ''),
-      ship_to_city: String(getColumnValue(row, ['Ship to Party City', 'City', 'Ship-to City', 'Destination City', 'Party City']) || ''),
-      payment_term: String(getColumnValue(row, ['Payment Term Desc.', 'Payment Terms', 'Payment Term', 'Terms']) || ''),
+      sales_person: String(getColumnValue(row, [
+        'Sales Person', 'Sales person Name', 'Salesperson', 'Representative'
+      ]) || ''),
+      ship_to_city: String(getColumnValue(row, [
+        'Destination', 'Ship to Party City', 'City', 'Ship-to City', 'Destination City', 'Party City'
+      ]) || ''),
+      payment_term: String(getColumnValue(row, [
+        'Payment terms', 'Payment Terms', 'Paymentterms', 'Payment Term Desc.', 'Payment Term', 'Terms'
+      ]) || ''),
       approval_status: String(getColumnValue(row, ['Approval Status', 'Status', 'Appr. Status']) || ''),
       delivery_block: String(getColumnValue(row, ['Delivery Block Description', 'Delivery Block', 'Block']) || ''),
       created_at: new Date().toISOString(),

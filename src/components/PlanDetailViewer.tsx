@@ -58,7 +58,7 @@ export const PlanDetailViewer: React.FC<PlanDetailViewerProps> = ({
 
   return (
     <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-950/80 backdrop-blur-xs flex items-center justify-center p-2 sm:p-4">
-      <div className="bg-white rounded-2xl shadow-2xl max-w-6xl w-full max-h-[96vh] flex flex-col overflow-hidden border border-slate-300">
+      <div className="bg-white rounded-2xl shadow-2xl max-w-7xl w-full max-h-[96vh] flex flex-col overflow-hidden border border-slate-300">
         {/* Modal Top Control Bar */}
         <div className="bg-slate-900 text-white px-6 py-3.5 flex items-center justify-between border-b border-slate-800 shrink-0">
           <div className="flex items-center space-x-3">
@@ -246,8 +246,8 @@ export const PlanDetailViewer: React.FC<PlanDetailViewerProps> = ({
 
             {/* View Mode 1: Consolidated Cutting Schedule Table */}
             {activeTab === 'SCHEDULE' && (
-              <div className="overflow-x-auto">
-                <table className="w-full text-left text-xs border-collapse font-mono">
+              <div className="overflow-x-auto print:overflow-visible">
+                <table className="w-full text-left text-xs border-collapse font-mono table-auto">
                   <thead>
                     {/* Super Headers */}
                     <tr className="bg-slate-200 text-slate-900 font-bold border-b border-slate-800">
@@ -260,21 +260,21 @@ export const PlanDetailViewer: React.FC<PlanDetailViewerProps> = ({
                     </tr>
                     {/* Column Headers */}
                     <tr className="bg-slate-100 text-slate-800 font-bold border-b border-slate-800 text-[11px]">
-                      <th className="py-2 px-2 border-r border-slate-300">SO#</th>
-                      <th className="py-2 px-2 border-r border-slate-300 text-center">Item</th>
-                      <th className="py-2 px-3 border-r border-slate-300">Customer</th>
-                      <th className="py-2 px-2 border-r border-slate-300 text-right">Length</th>
-                      <th className="py-2 px-1 border-r border-slate-300 text-center">Core</th>
-                      <th className="py-2 px-1 border-r border-slate-300 text-center">TS</th>
-                      <th className="py-2 px-2 border-r border-slate-300 text-right">Width</th>
-                      <th className="py-2 px-2 border-r-2 border-slate-800 text-right">Weight (kg)</th>
+                      <th className="py-2 px-2 border-r border-slate-300 whitespace-nowrap">SO#</th>
+                      <th className="py-2 px-2 border-r border-slate-300 text-center whitespace-nowrap">Item</th>
+                      <th className="py-2 px-3 border-r border-slate-300 min-w-[180px]">Customer</th>
+                      <th className="py-2 px-2 border-r border-slate-300 text-right whitespace-nowrap">Length</th>
+                      <th className="py-2 px-1 border-r border-slate-300 text-center whitespace-nowrap">Core</th>
+                      <th className="py-2 px-1 border-r border-slate-300 text-center whitespace-nowrap">TS</th>
+                      <th className="py-2 px-2 border-r border-slate-300 text-right whitespace-nowrap">Width</th>
+                      <th className="py-2 px-2 border-r-2 border-slate-800 text-right whitespace-nowrap">Weight (kg)</th>
 
-                      <th className="py-2 px-2 border-r border-slate-300 text-right bg-amber-50">Size (mm)</th>
-                      <th className="py-2 px-1 border-r border-slate-300 text-center bg-amber-50" title="Simultaneous physical slitting positions (0 for pending dynamic replacements)">UPS</th>
-                      <th className="py-2 px-2 border-r border-slate-300 text-right bg-amber-50">Deckle (mm)</th>
-                      <th className="py-2 px-2 border-r border-slate-300 text-right bg-amber-50">Reels</th>
-                      <th className="py-2 px-2 border-r border-slate-300 text-right bg-amber-50">Wt/Pack (kg)</th>
-                      <th className="py-2 px-2 text-right bg-amber-50 font-bold">Tot.Wt (kg)</th>
+                      <th className="py-2 px-2 border-r border-slate-300 text-right bg-amber-50 whitespace-nowrap">Size (mm)</th>
+                      <th className="py-2 px-2 border-r border-slate-300 text-center bg-amber-50 min-w-[88px]" title="Simultaneous physical slitting positions (0 for pending dynamic replacements)">UPS</th>
+                      <th className="py-2 px-2 border-r border-slate-300 text-right bg-amber-50 whitespace-nowrap">Deckle (mm)</th>
+                      <th className="py-2 px-2 border-r border-slate-300 text-right bg-amber-50 whitespace-nowrap">Reels</th>
+                      <th className="py-2 px-2 border-r border-slate-300 text-right bg-amber-50 whitespace-nowrap">Wt/Pack (kg)</th>
+                      <th className="py-2 px-2 text-right bg-amber-50 font-bold whitespace-nowrap">Tot.Wt (kg)</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-300 text-[11px]">
@@ -288,65 +288,76 @@ export const PlanDetailViewer: React.FC<PlanDetailViewerProps> = ({
                           key={item.key} 
                           className={isFuture ? "bg-amber-50/70 text-amber-950 font-medium" : "hover:bg-amber-50/40"}
                         >
-                          <td className="py-2 px-2 border-r border-slate-300 font-bold text-slate-900">
+                          <td className="py-2 px-2 border-r border-slate-300 font-bold text-slate-900 whitespace-nowrap">
                             {item.sales_order}
                           </td>
-                          <td className="py-2 px-2 border-r border-slate-300 text-center text-slate-700">
+                          <td className="py-2 px-2 border-r border-slate-300 text-center text-slate-700 whitespace-nowrap">
                             {item.item_number}
                           </td>
-                          <td className="py-2 px-3 border-r border-slate-300 font-sans font-medium text-slate-900 truncate max-w-[220px]" title={item.customer}>
-                            <div className="flex items-center space-x-1.5">
-                              <span>{item.customer}</span>
+                          <td className="py-2 px-3 border-r border-slate-300 font-sans font-medium text-slate-900 align-top min-w-[180px] max-w-[280px]">
+                            <div className="flex flex-col gap-1 items-start">
+                              <span className="break-words whitespace-normal leading-snug" title={item.customer}>
+                                {item.customer}
+                              </span>
                               {isFuture && (
-                                <span className="px-1.5 py-0.5 bg-amber-200 text-amber-900 text-[9px] font-bold rounded uppercase tracking-tight border border-amber-300 whitespace-nowrap">
-                                  Future Shift {item.start_pack ? `(Pack ${item.start_pack}+)` : ''}
+                                <span className="inline-flex px-1.5 py-0.5 bg-amber-200 text-amber-900 text-[9px] font-bold rounded uppercase tracking-tight border border-amber-300 whitespace-nowrap shrink-0">
+                                  Future Shift{item.start_pack ? ` (Pack ${item.start_pack}+)` : ''}
                                 </span>
                               )}
                             </div>
                           </td>
-                          <td className="py-2 px-2 border-r border-slate-300 text-right text-slate-700">
+                          <td className="py-2 px-2 border-r border-slate-300 text-right text-slate-700 whitespace-nowrap">
                             {item.length_m}
                           </td>
-                          <td className="py-2 px-1 border-r border-slate-300 text-center text-slate-800">
+                          <td className="py-2 px-1 border-r border-slate-300 text-center text-slate-800 whitespace-nowrap">
                             {item.core}"
                           </td>
-                          <td className="py-2 px-1 border-r border-slate-300 text-center text-slate-800">
+                          <td className="py-2 px-1 border-r border-slate-300 text-center text-slate-800 whitespace-nowrap">
                             {item.treatment_side}
                           </td>
-                          <td className="py-2 px-2 border-r border-slate-300 text-right font-bold text-slate-900">
+                          <td className="py-2 px-2 border-r border-slate-300 text-right font-bold text-slate-900 whitespace-nowrap">
                             {item.width_mm}
                           </td>
-                          <td className="py-2 px-2 border-r-2 border-slate-800 text-right text-slate-800">
+                          <td className="py-2 px-2 border-r-2 border-slate-800 text-right text-slate-800 whitespace-nowrap">
                             {(item.total_weight_kg ?? 0).toFixed(2)}
                           </td>
 
-                          {/* Right Slitting Deckle Columns */}
-                          <td className="py-2 px-2 border-r border-slate-300 text-right font-bold text-slate-900 bg-amber-50/40">
+                          {/* Right Slitting — Size (mm) ALWAYS the slit width number, never "-" */}
+                          <td className="py-2 px-2 border-r border-slate-300 text-right font-bold text-slate-900 bg-amber-50/40 whitespace-nowrap">
                             {item.width_mm}
                           </td>
-                          <td className="py-2 px-1 border-r border-slate-300 text-center font-bold bg-amber-50/40">
+                          <td className="py-2 px-2 border-r border-slate-300 text-center font-bold bg-amber-50/40 align-middle min-w-[88px]">
                             {isFuture ? (
-                              <span className="inline-block px-1.5 py-0.5 rounded text-[9px] font-black bg-amber-200 text-amber-900 uppercase border border-amber-400 whitespace-nowrap shadow-2xs">
+                              <span className="inline-flex px-1.5 py-0.5 rounded text-[8px] leading-tight font-black bg-amber-200 text-amber-900 uppercase border border-amber-400 whitespace-nowrap shadow-2xs">
                                 FUTURE SHIFT
                               </span>
-                            ) : (
+                            ) : displayUps > 0 ? (
                               <span className="text-slate-900 font-mono text-xs">{displayUps}</span>
+                            ) : (
+                              <span className="text-slate-400 font-mono font-normal">-</span>
                             )}
                           </td>
-                          <td className="py-2 px-2 border-r border-slate-300 text-right font-bold text-slate-900 bg-amber-50/40">
-                            {isFuture ? <span className="text-slate-400 font-mono font-normal">-</span> : (displayDeckle > 0 ? displayDeckle : '-')}
+                          <td className="py-2 px-2 border-r border-slate-300 text-right font-bold text-slate-900 bg-amber-50/40 whitespace-nowrap">
+                            {/* Size (mm) column is always width; Deckle: number when active UPS, "-" only for true FUTURE SHIFT */}
+                            {isFuture ? (
+                              <span className="text-slate-400 font-mono font-normal">-</span>
+                            ) : displayDeckle > 0 ? (
+                              displayDeckle
+                            ) : (
+                              <span className="text-slate-400 font-mono font-normal">-</span>
+                            )}
                           </td>
-                          <td className="py-2 px-2 border-r border-slate-300 text-right text-slate-800 bg-amber-50/40">
+                          <td className="py-2 px-2 border-r border-slate-300 text-right text-slate-800 bg-amber-50/40 whitespace-nowrap">
                             {item.reels}
                           </td>
-                          <td className="py-2 px-2 border-r border-slate-300 text-right text-slate-800 bg-amber-50/40">
+                          <td className="py-2 px-2 border-r border-slate-300 text-right text-slate-800 bg-amber-50/40 whitespace-nowrap">
                             {isFuture ? (
                               <span className="text-slate-400 font-mono">-</span>
                             ) : (
                               displayUps > 0 ? (item.weight_per_pack_kg > 0 ? item.weight_per_pack_kg.toFixed(2) : ((item.total_weight_kg ?? 0) / (plan.repetitions || 1)).toFixed(2)) : '-'
                             )}
                           </td>
-                          <td className="py-2 px-2 text-right font-bold text-emerald-900 bg-amber-100/50">
+                          <td className="py-2 px-2 text-right font-bold text-emerald-900 bg-amber-100/50 whitespace-nowrap">
                             {(item.total_weight_kg ?? 0).toFixed(2)}
                           </td>
                         </tr>

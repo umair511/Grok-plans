@@ -5,13 +5,18 @@ export const MSL_GREEN_MAX_TRIM_MM = 45;
 export const MSL_TARGET_TRIM_MM = 25;
 export const MSL_CUSTOMER_MAX_OVERALLOCATION_FACTOR = 1.10;
 
+/** Selectable PS01 mother deckles for MSL (trim policy unchanged). Default 10400. */
+export const MSL_PS01_DECKLE_OPTIONS = [10400, 8700] as const;
+
 export const DEFAULT_METALLIZER_SETTINGS: MetallizerMachineSettings = {
   id: 'msl-settings-01',
   machine_name: 'Metallizer Slitter',
   physical_ups: 6,
   preferred_ups: 3,
+  allow_4_ups: false, // default: 3-UPS only; planner can enable 4-UPS
   max_planning_ups: 6,
   max_jumbo_width_mm: 3650,
+  ps01_deckle_width_mm: 10400,
   max_jumbo_diameter_mm: 1250,
   min_trim_mm: 20,
   max_trim_mm: 30,

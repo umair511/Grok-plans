@@ -3,6 +3,7 @@
  * Optimizer logic is imported as-is; this file only offloads CPU work off the UI thread.
  */
 import { generateJumboRollRequirements, generateMetallizerPlans } from './metallizerOptimizer';
+import { hydrateFilmSpecsCache } from '../stuffing/filmDensities';
 
 export type MSLWorkerRequest =
   | {
@@ -11,6 +12,7 @@ export type MSLWorkerRequest =
       settings: any;
       film?: string;
       executionId?: string;
+      filmSpecs?: any[];
     }
   | {
       type: 'RUN_PLANS';
@@ -20,6 +22,7 @@ export type MSLWorkerRequest =
       film?: string;
       options?: any;
       executionId?: string;
+      filmSpecs?: any[];
     };
 
 export type MSLWorkerResponse =
@@ -48,6 +51,9 @@ if (typeof self !== 'undefined' && typeof window === 'undefined') {
     const tStart = performance.now();
 
     try {
+      // Permanent: density Master DB from main thread (no localStorage in workers)
+      hydrateFilmSpecsCache((data as any).filmSpecs);
+
       if (data.type === 'RUN_SYNTHESIS') {
         const requirements = generateJumboRollRequirements(
           data.orders,

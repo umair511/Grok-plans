@@ -33,6 +33,9 @@ export function getStoredSSSettings(): SSMachineSettings {
           ...DEFAULT_SS_SETTINGS,
           ...parsed,
           max_jumbo_width_mm: Math.max(parsed.max_jumbo_width_mm || 0, DEFAULT_SS_SETTINGS.max_jumbo_width_mm),
+          ps01_deckle_width_mm: Number(parsed.ps01_deckle_width_mm) > 0
+            ? Number(parsed.ps01_deckle_width_mm)
+            : DEFAULT_SS_SETTINGS.ps01_deckle_width_mm,
           min_trim_mm: legacyMin ? 11 : (parsed.min_trim_mm ?? DEFAULT_SS_SETTINGS.min_trim_mm),
           max_trim_mm: legacyMax ? 35 : (parsed.max_trim_mm ?? DEFAULT_SS_SETTINGS.max_trim_mm),
           hard_max_trim_mm: legacyHard ? 45 : (parsed.hard_max_trim_mm ?? DEFAULT_SS_SETTINGS.hard_max_trim_mm),

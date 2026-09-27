@@ -259,7 +259,12 @@ export function getStoredRules(): PlanningRules {
           saveStoredRules(migrated);
           return migrated;
         }
-        return parsed;
+        const deckle = Number(parsed.deckle_width_mm ?? parsed.deckle_mm) || DEFAULT_PLANNING_RULES.deckle_width_mm;
+        return {
+          ...parsed,
+          deckle_width_mm: deckle,
+          deckle_mm: deckle,
+        };
       }
     }
   } catch (e) {
@@ -271,7 +276,9 @@ export function getStoredRules(): PlanningRules {
 export function saveStoredRules(rules: PlanningRules) {
   try {
     if (isStorageAvailable()) {
-      localStorage.setItem(STORAGE_KEYS.RULES, JSON.stringify(rules));
+      const deckle = Number(rules.deckle_width_mm ?? rules.deckle_mm) || 10400;
+      const normalized = { ...rules, deckle_width_mm: deckle, deckle_mm: deckle };
+      localStorage.setItem(STORAGE_KEYS.RULES, JSON.stringify(normalized));
     }
   } catch (e) {
     console.error('Error saving rules:', e);

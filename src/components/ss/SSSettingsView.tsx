@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   Sliders, 
   RotateCcw, 
@@ -21,22 +21,38 @@ export const SSSettingsView: React.FC<SSSettingsViewProps> = ({
   settings,
   onSettingsSaved,
 }) => {
-  const [formData, setFormData] = useState<SSMachineSettings>(settings);
+  const [formData, setFormData] = useState<SSMachineSettings>({ ...settings });
   const [saveSuccess, setSaveSuccess] = useState(false);
+
+  useEffect(() => {
+    setFormData({ ...settings });
+  }, [settings]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    saveStoredMetallizerSettings(formData);
-    onSettingsSaved(formData);
+    const toSave: SSMachineSettings = {
+      ...formData,
+      max_planning_ups: Math.min(20, Math.max(1, Number(formData.max_planning_ups) || 20)),
+      updated_at: new Date().toISOString(),
+    };
+    // Empty slit fields = no limit
+    if (!(Number(toSave.min_slit_width_mm) > 0)) delete (toSave as any).min_slit_width_mm;
+    if (!(Number(toSave.max_slit_width_mm) > 0)) delete (toSave as any).max_slit_width_mm;
+    saveStoredMetallizerSettings(toSave);
+    onSettingsSaved(toSave);
+    setFormData(toSave);
     setSaveSuccess(true);
     setTimeout(() => setSaveSuccess(false), 2500);
   };
 
   const handleResetDefaults = () => {
     if (window.confirm('Reset Secondary Slitter settings to factory default specifications?')) {
-      setFormData(DEFAULT_SS_SETTINGS);
-      saveStoredMetallizerSettings(DEFAULT_SS_SETTINGS);
-      onSettingsSaved(DEFAULT_SS_SETTINGS);
+      const defaults = { ...DEFAULT_SS_SETTINGS };
+      delete (defaults as any).min_slit_width_mm;
+      delete (defaults as any).max_slit_width_mm;
+      setFormData(defaults);
+      saveStoredMetallizerSettings(defaults);
+      onSettingsSaved(defaults);
       setSaveSuccess(true);
       setTimeout(() => setSaveSuccess(false), 2500);
     }
@@ -99,12 +115,25 @@ export const SSSettingsView: React.FC<SSSettingsViewProps> = ({
             </div>
 
             <div>
+              <label className="block font-semibold text-slate-700 mb-1">PS01 Mother Deckle (mm)</label>
+              <input
+                type="number"
+                min={1000}
+                max={20000}
+                value={formData.ps01_deckle_width_mm ?? 10400}
+                onChange={(e) => setFormData({ ...formData, ps01_deckle_width_mm: Number(e.target.value) || 10400 })}
+                className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg font-mono font-bold text-slate-900 focus:ring-2 focus:ring-purple-300/50"
+              />
+              <span className="text-[10px] text-slate-400">Jumbo packs form against this deckle; SS trim unchanged</span>
+            </div>
+
+            <div>
               <label className="block font-semibold text-slate-700 mb-1">Max Jumbo Width (mm)</label>
               <input
                 type="number"
                 value={formData.max_jumbo_width_mm}
                 onChange={(e) => setFormData({ ...formData, max_jumbo_width_mm: Number(e.target.value) })}
-                className="w-full px-3 py-1.5 bg-slate-50 border border-slate-300 rounded-lg font-mono font-bold text-slate-900"
+                className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg font-mono font-bold text-slate-900 focus:ring-2 focus:ring-purple-300/50"
               />
               <span className="text-[10px] text-slate-400">Default: 1700 mm (Section 9.2)</span>
             </div>
@@ -115,7 +144,7 @@ export const SSSettingsView: React.FC<SSSettingsViewProps> = ({
                 type="number"
                 value={formData.max_jumbo_diameter_mm}
                 onChange={(e) => setFormData({ ...formData, max_jumbo_diameter_mm: Number(e.target.value) })}
-                className="w-full px-3 py-1.5 bg-slate-50 border border-slate-300 rounded-lg font-mono font-bold text-purple-900"
+                className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg font-mono font-bold text-purple-900 focus:ring-2 focus:ring-purple-300/50"
               />
               <span className="text-[10px] text-slate-400">Hard limit: 1000 mm (Section 9.7)</span>
             </div>
@@ -138,11 +167,11 @@ export const SSSettingsView: React.FC<SSSettingsViewProps> = ({
               <input
                 type="number"
                 step="0.001"
-                value={formData.density}
+                value={formData.density ?? ''}
                 onChange={(e) => setFormData({ ...formData, density: Number(e.target.value) })}
-                className="w-full px-3 py-1.5 bg-slate-50 border border-slate-300 rounded-lg font-mono font-bold text-slate-900"
+                className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg font-mono font-bold text-slate-900 focus:ring-2 focus:ring-purple-300/50"
               />
-              <span className="text-[10px] text-slate-400">Standard BOPP density: 0.91</span>
+              <span className="text-[10px] text-slate-400">Planning uses Film Specs Master DB per film; UI value is machine default fallback only</span>
             </div>
 
             <div>
@@ -152,7 +181,7 @@ export const SSSettingsView: React.FC<SSSettingsViewProps> = ({
                 step="0.01"
                 value={formData.diameter_constant}
                 onChange={(e) => setFormData({ ...formData, diameter_constant: Number(e.target.value) })}
-                className="w-full px-3 py-1.5 bg-slate-50 border border-slate-300 rounded-lg font-mono font-bold text-slate-900"
+                className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg font-mono font-bold text-slate-900 focus:ring-2 focus:ring-purple-300/50"
               />
               <span className="text-[10px] text-slate-400">Formula: D = k × √(T × L)</span>
             </div>
@@ -171,10 +200,10 @@ export const SSSettingsView: React.FC<SSSettingsViewProps> = ({
               <input
                 type="number"
                 min={1}
-                max={14}
+                max={20}
                 value={formData.preferred_ups}
                 onChange={(e) => setFormData({ ...formData, preferred_ups: Number(e.target.value) })}
-                className="w-full px-3 py-1.5 bg-slate-50 border border-slate-300 rounded-lg font-mono font-bold text-slate-900"
+                className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg font-mono font-bold text-slate-900 focus:ring-2 focus:ring-purple-300/50"
               />
               <span className="text-[10px] text-slate-400">Primary target: 6 UPS</span>
             </div>
@@ -184,12 +213,12 @@ export const SSSettingsView: React.FC<SSSettingsViewProps> = ({
               <input
                 type="number"
                 min={1}
-                max={14}
+                max={20}
                 value={formData.max_planning_ups}
                 onChange={(e) => setFormData({ ...formData, max_planning_ups: Number(e.target.value) })}
-                className="w-full px-3 py-1.5 bg-slate-50 border border-slate-300 rounded-lg font-mono font-bold text-slate-900"
+                className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg font-mono font-bold text-slate-900 focus:ring-2 focus:ring-purple-300/50"
               />
-              <span className="text-[10px] text-slate-400">Total 14 UPS available (1 to 14 UPS)</span>
+              <span className="text-[10px] text-slate-400">Up to 20 UPS available (1 to 14 UPS)</span>
             </div>
 
             <div>
@@ -198,7 +227,7 @@ export const SSSettingsView: React.FC<SSSettingsViewProps> = ({
                 type="number"
                 value={formData.min_trim_mm}
                 onChange={(e) => setFormData({ ...formData, min_trim_mm: Number(e.target.value) })}
-                className="w-full px-3 py-1.5 bg-slate-50 border border-slate-300 rounded-lg font-mono font-bold text-slate-900"
+                className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg font-mono font-bold text-slate-900 focus:ring-2 focus:ring-purple-300/50"
               />
               <span className="text-[10px] text-slate-400">GREEN zone min: 11 mm</span>
             </div>
@@ -209,7 +238,7 @@ export const SSSettingsView: React.FC<SSSettingsViewProps> = ({
                 type="number"
                 value={formData.max_trim_mm}
                 onChange={(e) => setFormData({ ...formData, max_trim_mm: Number(e.target.value) })}
-                className="w-full px-3 py-1.5 bg-slate-50 border border-slate-300 rounded-lg font-mono font-bold text-slate-900"
+                className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg font-mono font-bold text-slate-900 focus:ring-2 focus:ring-purple-300/50"
               />
               <span className="text-[10px] text-slate-400">GREEN zone max: 35 mm</span>
             </div>
@@ -220,22 +249,38 @@ export const SSSettingsView: React.FC<SSSettingsViewProps> = ({
               <label className="block font-semibold text-slate-700 mb-1">Min Slit Width (mm)</label>
               <input
                 type="number"
-                value={formData.min_slit_width_mm}
-                onChange={(e) => setFormData({ ...formData, min_slit_width_mm: Number(e.target.value) })}
-                className="w-full px-3 py-1.5 bg-slate-50 border border-slate-300 rounded-lg font-mono font-bold text-slate-900"
+                min={0}
+                placeholder="No limit"
+                value={formData.min_slit_width_mm ?? ''}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  setFormData({
+                    ...formData,
+                    min_slit_width_mm: v === '' ? undefined : Number(v),
+                  });
+                }}
+                className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg font-mono font-bold text-slate-900 focus:ring-2 focus:ring-purple-300/50"
               />
-              <span className="text-[10px] text-slate-400">Default: 300 mm</span>
+              <span className="text-[10px] text-slate-400">Leave empty = no minimum size limit</span>
             </div>
 
             <div>
               <label className="block font-semibold text-slate-700 mb-1">Max Slit Width (mm)</label>
               <input
                 type="number"
-                value={formData.max_slit_width_mm}
-                onChange={(e) => setFormData({ ...formData, max_slit_width_mm: Number(e.target.value) })}
-                className="w-full px-3 py-1.5 bg-slate-50 border border-slate-300 rounded-lg font-mono font-bold text-slate-900"
+                min={0}
+                placeholder="No limit"
+                value={formData.max_slit_width_mm ?? ''}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  setFormData({
+                    ...formData,
+                    max_slit_width_mm: v === '' ? undefined : Number(v),
+                  });
+                }}
+                className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg font-mono font-bold text-slate-900 focus:ring-2 focus:ring-purple-300/50"
               />
-              <span className="text-[10px] text-slate-400">Default: 2000 mm</span>
+              <span className="text-[10px] text-slate-400">Leave empty = no maximum size limit</span>
             </div>
 
             <div>
@@ -244,7 +289,7 @@ export const SSSettingsView: React.FC<SSSettingsViewProps> = ({
                 type="number"
                 value={formData.hard_max_trim_mm}
                 onChange={(e) => setFormData({ ...formData, hard_max_trim_mm: Number(e.target.value) })}
-                className="w-full px-3 py-1.5 bg-slate-50 border border-slate-300 rounded-lg font-mono font-bold text-slate-900"
+                className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg font-mono font-bold text-slate-900 focus:ring-2 focus:ring-purple-300/50"
               />
               <span className="text-[10px] text-slate-400">YELLOW zone max: 45 mm (36–45)</span>
             </div>

@@ -1,34 +1,51 @@
-import React, { useState } from 'react';
-import { PlanningRules, FilmMaster, UserProfile } from '../types';
-import { FILM_MASTERS, DEFAULT_PLANNING_RULES } from '../services/masterData';
+import React, { useState, useEffect } from 'react';
+import { PlanningRules, UserProfile } from '../types';
+import { DEFAULT_PLANNING_RULES } from '../services/masterData';
 import { saveStoredRules, logAuditEvent } from '../services/storage';
-import { Settings, ShieldCheck, Layers, Save, RotateCcw, CheckCircle2, AlertTriangle } from 'lucide-react';
+import { Settings, ShieldCheck, Save, RotateCcw, CheckCircle2 } from 'lucide-react';
 
 interface MastersRulesProps {
   rules: PlanningRules;
   currentUser: UserProfile;
   onRulesUpdated: (newRules: PlanningRules) => void;
-  onOpenTests?: () => void;
 }
 
 export const MastersRules: React.FC<MastersRulesProps> = ({
   rules,
   currentUser,
   onRulesUpdated,
-  onOpenTests,
 }) => {
-  const [formRules, setFormRules] = useState<PlanningRules>({ ...rules });
+  const normalizeRules = (r: PlanningRules): PlanningRules => {
+    const deckle = Number(r.deckle_width_mm ?? r.deckle_mm) || 10400;
+    return {
+      ...r,
+      deckle_width_mm: deckle,
+      deckle_mm: deckle,
+    };
+  };
+
+  const [formRules, setFormRules] = useState<PlanningRules>(() => normalizeRules({ ...rules }));
   const [savedSuccess, setSavedSuccess] = useState(false);
 
+  useEffect(() => {
+    setFormRules(normalizeRules({ ...rules }));
+  }, [rules]);
+
   const handleSave = () => {
-    saveStoredRules(formRules);
-    onRulesUpdated(formRules);
+    const toSave = normalizeRules({
+      ...formRules,
+      version: formRules.version || '1.2',
+      updated_at: new Date().toISOString(),
+    });
+    saveStoredRules(toSave);
+    onRulesUpdated(toSave);
+    setFormRules(toSave);
     logAuditEvent(
       currentUser,
       'UPDATE',
       'PLANNING_RULES',
-      formRules.version,
-      `Updated machine rules: Deckle=${formRules.deckle_mm}mm, Trim=${formRules.min_trim_mm}-${formRules.max_trim_mm}mm, UPS=${formRules.min_ups}-${formRules.max_ups}`
+      toSave.version,
+      `Updated machine rules: Deckle=${toSave.deckle_width_mm}mm, Trim=${toSave.min_trim_mm}-${toSave.max_trim_mm}mm, UPS=${toSave.min_ups}-${toSave.max_ups}`
     );
     setSavedSuccess(true);
     setTimeout(() => setSavedSuccess(false), 3000);
@@ -45,10 +62,10 @@ export const MastersRules: React.FC<MastersRulesProps> = ({
         <div>
           <h2 className="text-base font-bold text-slate-900 flex items-center space-x-2">
             <Settings className="w-5 h-5 text-emerald-600" />
-            <span>Machine Parameters & Master Data</span>
+            <span>Primary Slitter Parameters</span>
           </h2>
           <p className="text-xs text-slate-500 mt-0.5">
-            Primary Slitter machine constraints and BOPP film grade specifications (SRS Section 86).
+            Configure PS machine limits: deckle, trim window, UPS, and slit constraints.
           </p>
         </div>
 
@@ -80,7 +97,7 @@ export const MastersRules: React.FC<MastersRulesProps> = ({
       )}
 
       {/* Grid: Machine Constraints & Film Masters */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+      <div className="max-w-2xl">
         {/* Machine Configuration */}
         <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-xs space-y-4">
           <div className="flex items-center space-x-2 border-b border-slate-100 pb-2">
@@ -93,12 +110,18 @@ export const MastersRules: React.FC<MastersRulesProps> = ({
               <label className="text-slate-600 font-semibold block mb-1">Total Deckle Width (mm):</label>
               <input
                 type="number"
-                value={formRules.deckle_mm}
-                onChange={(e) => setFormRules({ ...formRules, deckle_mm: parseFloat(e.target.value) || 10400 })}
+                min={1000}
+                max={20000}
+                step={1}
+                value={formRules.deckle_width_mm ?? formRules.deckle_mm ?? 10400}
+                onChange={(e) => {
+                  const v = parseFloat(e.target.value) || 10400;
+                  setFormRules({ ...formRules, deckle_width_mm: v, deckle_mm: v });
+                }}
                 disabled={currentUser.role === 'VIEWER'}
-                className="w-full px-3 py-2 border border-slate-300 rounded-lg font-mono font-bold text-slate-900 bg-slate-50"
+                className="w-full px-3 py-2 border border-slate-300 rounded-lg font-mono font-bold text-slate-900 bg-white focus:ring-2 focus:ring-emerald-300/50 focus:border-emerald-400"
               />
-              <span className="text-[10px] text-slate-400">Fixed BOPP Mill Roll web width (10,400 mm)</span>
+              <span className="text-[10px] text-slate-400">Editable mill-roll / mother deckle width (mm). PS engine uses this value.</span>
             </div>
 
             <div className="grid grid-cols-2 gap-3">
@@ -109,7 +132,7 @@ export const MastersRules: React.FC<MastersRulesProps> = ({
                   value={formRules.min_trim_mm}
                   onChange={(e) => setFormRules({ ...formRules, min_trim_mm: parseFloat(e.target.value) || 150 })}
                   disabled={currentUser.role === 'VIEWER'}
-                  className="w-full px-3 py-2 border border-slate-300 rounded-lg font-mono font-bold text-slate-900 bg-slate-50"
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg font-mono font-bold text-slate-900 bg-white focus:ring-2 focus:ring-emerald-300/50 focus:border-emerald-400 disabled:bg-slate-50 disabled:opacity-70"
                 />
               </div>
               <div>
@@ -119,7 +142,7 @@ export const MastersRules: React.FC<MastersRulesProps> = ({
                   value={formRules.max_trim_mm}
                   onChange={(e) => setFormRules({ ...formRules, max_trim_mm: parseFloat(e.target.value) || 280 })}
                   disabled={currentUser.role === 'VIEWER'}
-                  className="w-full px-3 py-2 border border-slate-300 rounded-lg font-mono font-bold text-slate-900 bg-slate-50"
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg font-mono font-bold text-slate-900 bg-white focus:ring-2 focus:ring-emerald-300/50 focus:border-emerald-400 disabled:bg-slate-50 disabled:opacity-70"
                 />
               </div>
             </div>
@@ -132,7 +155,7 @@ export const MastersRules: React.FC<MastersRulesProps> = ({
                   value={formRules.min_ups}
                   onChange={(e) => setFormRules({ ...formRules, min_ups: parseInt(e.target.value) || 3 })}
                   disabled={currentUser.role === 'VIEWER'}
-                  className="w-full px-3 py-2 border border-slate-300 rounded-lg font-mono font-bold text-slate-900 bg-slate-50"
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg font-mono font-bold text-slate-900 bg-white focus:ring-2 focus:ring-emerald-300/50 focus:border-emerald-400 disabled:bg-slate-50 disabled:opacity-70"
                 />
               </div>
               <div>
@@ -142,7 +165,7 @@ export const MastersRules: React.FC<MastersRulesProps> = ({
                   value={formRules.max_ups}
                   onChange={(e) => setFormRules({ ...formRules, max_ups: parseInt(e.target.value) || 16 })}
                   disabled={currentUser.role === 'VIEWER'}
-                  className="w-full px-3 py-2 border border-slate-300 rounded-lg font-mono font-bold text-slate-900 bg-slate-50"
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg font-mono font-bold text-slate-900 bg-white focus:ring-2 focus:ring-emerald-300/50 focus:border-emerald-400 disabled:bg-slate-50 disabled:opacity-70"
                 />
               </div>
             </div>
@@ -155,7 +178,7 @@ export const MastersRules: React.FC<MastersRulesProps> = ({
                   value={formRules.full_repetition_length_m}
                   onChange={(e) => setFormRules({ ...formRules, full_repetition_length_m: parseFloat(e.target.value) || 19500 })}
                   disabled={currentUser.role === 'VIEWER'}
-                  className="w-full px-3 py-2 border border-slate-300 rounded-lg font-mono font-bold text-slate-900 bg-slate-50"
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg font-mono font-bold text-slate-900 bg-white focus:ring-2 focus:ring-emerald-300/50 focus:border-emerald-400 disabled:bg-slate-50 disabled:opacity-70"
                 />
               </div>
               <div>
@@ -165,7 +188,7 @@ export const MastersRules: React.FC<MastersRulesProps> = ({
                   value={formRules.half_repetition_length_m}
                   onChange={(e) => setFormRules({ ...formRules, half_repetition_length_m: parseFloat(e.target.value) || 9750 })}
                   disabled={currentUser.role === 'VIEWER'}
-                  className="w-full px-3 py-2 border border-slate-300 rounded-lg font-mono font-bold text-slate-900 bg-slate-50"
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg font-mono font-bold text-slate-900 bg-white focus:ring-2 focus:ring-emerald-300/50 focus:border-emerald-400 disabled:bg-slate-50 disabled:opacity-70"
                 />
               </div>
             </div>
@@ -177,7 +200,7 @@ export const MastersRules: React.FC<MastersRulesProps> = ({
                 value={formRules.min_slit_width_mm || 355}
                 onChange={(e) => setFormRules({ ...formRules, min_slit_width_mm: parseFloat(e.target.value) || 355 })}
                 disabled={currentUser.role === 'VIEWER'}
-                className="w-full px-3 py-2 border border-slate-300 rounded-lg font-mono font-bold text-slate-900 bg-slate-50"
+                className="w-full px-3 py-2 border border-slate-300 rounded-lg font-mono font-bold text-slate-900 bg-white focus:ring-2 focus:ring-emerald-300/50 focus:border-emerald-400 disabled:bg-slate-50 disabled:opacity-70"
               />
               <span className="text-[10px] text-slate-400">PS hard physical limit: minimum allowable slit width (355 mm)</span>
             </div>
@@ -187,7 +210,7 @@ export const MastersRules: React.FC<MastersRulesProps> = ({
             <div className="text-emerald-400 font-bold font-sans">Primary Slitter Hard Constraints:</div>
             <div className="flex justify-between border-b border-slate-800 pb-1">
               <span className="text-slate-400">Total Deckle:</span>
-              <span className="text-white font-bold">{formRules.deckle_mm} mm</span>
+              <span className="text-white font-bold">{formRules.deckle_width_mm ?? formRules.deckle_mm} mm</span>
             </div>
             <div className="flex justify-between border-b border-slate-800 pb-1">
               <span className="text-slate-400">Valid Trim Window:</span>
@@ -195,7 +218,7 @@ export const MastersRules: React.FC<MastersRulesProps> = ({
             </div>
             <div className="flex justify-between border-b border-slate-800 pb-1">
               <span className="text-slate-400">Valid Slit Window:</span>
-              <span className="text-white font-bold">{formRules.deckle_mm - formRules.max_trim_mm} – {formRules.deckle_mm - formRules.min_trim_mm} mm</span>
+              <span className="text-white font-bold">{(formRules.deckle_width_mm ?? formRules.deckle_mm) - formRules.max_trim_mm} – {(formRules.deckle_width_mm ?? formRules.deckle_mm) - formRules.min_trim_mm} mm</span>
             </div>
             <div className="flex justify-between border-b border-slate-800 pb-1">
               <span className="text-slate-400">Active Arms / UPS:</span>
@@ -206,59 +229,8 @@ export const MastersRules: React.FC<MastersRulesProps> = ({
               <span className="text-amber-300 font-bold">{formRules.min_slit_width_mm || 355} mm</span>
             </div>
           </div>
-
-          {onOpenTests && (
-            <button
-              onClick={onOpenTests}
-              className="w-full py-2.5 px-3 bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-800 hover:text-emerald-900 border border-emerald-500/50 rounded-lg text-xs font-bold flex items-center justify-center space-x-1.5 transition-colors cursor-pointer"
-            >
-              <ShieldCheck className="w-4 h-4 text-emerald-600" />
-              <span>Verify Machine Hard Rules (Test Suite)</span>
-            </button>
-          )}
         </div>
 
-        {/* BOPP Film Master Catalog */}
-        <div className="lg:col-span-2 bg-white border border-slate-200 rounded-xl p-5 shadow-xs space-y-4">
-          <div className="flex items-center justify-between border-b border-slate-100 pb-2">
-            <div className="flex items-center space-x-2">
-              <Layers className="w-4 h-4 text-emerald-600" />
-              <h3 className="text-sm font-bold text-slate-900">BOPP Film Master Catalog ({FILM_MASTERS.length} Grades)</h3>
-            </div>
-            <span className="text-[11px] text-slate-500">Master Film Specifications</span>
-          </div>
-
-          <div className="overflow-x-auto border border-slate-200 rounded-lg">
-            <table className="w-full text-left text-xs">
-              <thead className="bg-slate-50 text-slate-600 font-semibold border-b border-slate-200">
-                <tr>
-                  <th className="py-2.5 px-3">Grade Code</th>
-                  <th className="py-2.5 px-3">Film Description</th>
-                  <th className="py-2.5 px-3">Category</th>
-                  <th className="py-2.5 px-3 text-right">Thickness (µ)</th>
-                  <th className="py-2.5 px-3 text-right">Density (g/cm³)</th>
-                  <th className="py-2.5 px-3">Rej Code</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100 font-mono">
-                {FILM_MASTERS.map(film => (
-                  <tr key={film.code} className="hover:bg-slate-50">
-                    <td className="py-2 px-3 font-bold text-slate-900 font-sans">{film.code}</td>
-                    <td className="py-2 px-3 font-sans text-slate-700">{film.name}</td>
-                    <td className="py-2 px-3 font-sans">
-                      <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-700">
-                        {film.category}
-                      </span>
-                    </td>
-                    <td className="py-2 px-3 text-right font-bold text-slate-900">{film.thickness_micron}</td>
-                    <td className="py-2 px-3 text-right text-emerald-800 font-bold">{film.density}</td>
-                    <td className="py-2 px-3 text-rose-700 font-bold text-[11px]">{film.rejection_code || film.rejection_material_code || '-'}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
       </div>
     </div>
   );

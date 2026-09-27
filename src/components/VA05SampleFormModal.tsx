@@ -201,12 +201,12 @@ export const VA05SampleFormModal: React.FC<VA05SampleFormModalProps> = ({
       'IMPORT',
       'ORDER',
       newOrder.id,
-      `Manually created VA05 order [${newOrder.sales_order} / Item ${newOrder.item_number}] (${newOrder.film} ${newOrder.width_mm}mm × ${newOrder.length_m}m, ${newOrder.remaining_qty} kg)`
+      `Manually created Planning Sheet order [${newOrder.sales_order} / Item ${newOrder.item_number}] (${newOrder.film} ${newOrder.width_mm}mm × ${newOrder.length_m}m, ${newOrder.remaining_qty} kg)`
     );
 
     setFeedback({
       type: 'SUCCESS',
-      message: `VA05 Order [${newOrder.sales_order} - ${newOrder.customer}] successfully added to pending queue!`,
+      message: `Order [${newOrder.sales_order} - ${newOrder.customer}] successfully added to pending queue!`,
       addedOrders: [newOrder],
     });
 
@@ -373,127 +373,77 @@ export const VA05SampleFormModal: React.FC<VA05SampleFormModalProps> = ({
       'IMPORT',
       'IMPORT_BATCH',
       batchId,
-      `Generated 4-Order Sample VA05 Deckle Batch (${newBatch.batch_number}) with 19,500 kg total demand`
+      `Generated 4-Order Sample Planning Sheet Deckle Batch (${newBatch.batch_number}) with 19,500 kg total demand`
     );
 
     setFeedback({
       type: 'SUCCESS',
-      message: `Successfully loaded 4 sample VA05 orders (19,500 kg total demand) into the pending queue!`,
+      message: `Successfully loaded 4 sample Planning Sheet orders (19,500 kg total demand) into the pending queue!`,
       addedOrders: sampleDeckleOrders,
     });
   };
 
-  // Download Sample SAP VA05 Excel Template
+  // Download Factory Planning Sheet Excel Template (planning-required headers only)
   const handleDownloadSampleExcel = () => {
     const sampleRows = [
       {
-        'Sales Document': 'SO-908124',
-        'Item': 10,
-        'Sold to Party': 'UNIVERSAL PACKAGING LTD',
-        'Material': 'TNO20',
-        'Material Description': 'Plain Transparent BOPP Film 20µ',
-        'Width (mm)': 1103,
-        'Length (m)': 19500,
-        'Core': '6"',
-        'Treatment Side': 'OS',
-        'Ordered Qty (kg)': 6500,
-        'Balance Qty (kg)': 6500,
-        'Delivery Date': '2026-09-01',
-        'Customer Reference': 'PO-88210',
-        'Ship to City': 'Lahore',
-        'Sales Person': 'Farhan Ali',
+        'Sales Order #': '11001752',
+        'Item #': 20,
+        'Customer': 'IMBALLAGGI WEST AFRICA',
+        'Film Code': 'TH21-20',
+        'Width (mm)': 1215,
+        'Length (m)': 9750,
+        'Core ID': 6,
+        'TS / MTS': 'OS',
+        'Order Qty': 3880.83,
+        'Bal QtY': 510.15,
+        'Delivery Date': '18.09.2026',
       },
       {
-        'Sales Document': 'SO-908124',
-        'Item': 20,
-        'Sold to Party': 'UNIVERSAL PACKAGING LTD',
-        'Material': 'TNO20',
-        'Material Description': 'Plain Transparent BOPP Film 20µ',
-        'Width (mm)': 1085,
-        'Length (m)': 19500,
-        'Core': '6"',
-        'Treatment Side': 'OS',
-        'Ordered Qty (kg)': 3200,
-        'Balance Qty (kg)': 3200,
-        'Delivery Date': '2026-09-01',
-        'Customer Reference': 'PO-88210',
-        'Ship to City': 'Lahore',
-        'Sales Person': 'Farhan Ali',
+        'Sales Order #': '10008873',
+        'Item #': 10,
+        'Customer': 'Fine Printer',
+        'Film Code': 'THI20',
+        'Width (mm)': 560,
+        'Length (m)': 10000,
+        'Core ID': 3,
+        'TS / MTS': 'IS',
+        'Order Qty': 1200,
+        'Bal QtY': 1200,
+        'Delivery Date': '28.09.2026',
       },
       {
-        'Sales Document': 'SO-908125',
-        'Item': 10,
-        'Sold to Party': 'PREMIER PACKAGING LTD',
-        'Material': 'TNO20',
-        'Material Description': 'Plain Transparent BOPP Film 20µ',
-        'Width (mm)': 1050,
-        'Length (m)': 19500,
-        'Core': '6"',
-        'Treatment Side': 'OS',
-        'Ordered Qty (kg)': 5400,
-        'Balance Qty (kg)': 5400,
-        'Delivery Date': '2026-09-05',
-        'Customer Reference': 'PO-77402',
-        'Ship to City': 'Karachi',
-        'Sales Person': 'Muhammad Asif',
+        'Sales Order #': '15002460',
+        'Item #': 10,
+        'Customer': 'Saad Plastic Industries',
+        'Film Code': 'THO20',
+        'Width (mm)': 510,
+        'Length (m)': 10000,
+        'Core ID': 3,
+        'TS / MTS': 'OS',
+        'Order Qty': 500,
+        'Bal QtY': 500,
+        'Delivery Date': '10.10.2026',
       },
       {
-        'Sales Document': 'SO-908126',
-        'Item': 10,
-        'Sold to Party': 'CREATIVE CONVERTERS',
-        'Material': 'TH21-20',
-        'Material Description': 'Heat Sealable Transparent Film 20µ',
-        'Width (mm)': 1020,
-        'Length (m)': 19500,
-        'Core': '6"',
-        'Treatment Side': 'OS',
-        'Ordered Qty (kg)': 4800,
-        'Balance Qty (kg)': 4800,
-        'Delivery Date': '2026-09-10',
-        'Customer Reference': 'PO-66190',
-        'Ship to City': 'Faisalabad',
-        'Sales Person': 'Tariq Mehmood',
-      },
-      {
-        'Sales Document': 'SO-908127',
-        'Item': 10,
-        'Sold to Party': 'ALPHA PRINTS PVT LTD',
-        'Material': 'MZ18',
-        'Material Description': 'Metalized Barrier Film 18µ',
-        'Width (mm)': 980,
-        'Length (m)': 19500,
-        'Core': '6"',
-        'Treatment Side': 'OS',
-        'Ordered Qty (kg)': 4200,
-        'Balance Qty (kg)': 4200,
-        'Delivery Date': '2026-09-12',
-        'Customer Reference': 'PO-55104',
-        'Ship to City': 'Gujranwala',
-        'Sales Person': 'Imran Qureshi',
-      },
-      {
-        'Sales Document': 'SO-908128',
-        'Item': 10,
-        'Sold to Party': 'ORIENT PACKAGING',
-        'Material': 'TH21-30',
-        'Material Description': 'Heat Sealable Transparent Film 30µ',
-        'Width (mm)': 1050,
-        'Length (m)': 12900,
-        'Core': '6"',
-        'Treatment Side': 'OS',
-        'Ordered Qty (kg)': 5000,
-        'Balance Qty (kg)': 5000,
-        'Delivery Date': '2026-09-15',
-        'Customer Reference': 'PO-44091',
-        'Ship to City': 'Lahore',
-        'Sales Person': 'Farhan Ali',
+        'Sales Order #': '10008942',
+        'Item #': 30,
+        'Customer': 'Universal Packaging Company (Pvt) Limited',
+        'Film Code': 'THO20',
+        'Width (mm)': 1198,
+        'Length (m)': 22200,
+        'Core ID': 6,
+        'TS / MTS': 'OS',
+        'Order Qty': 2600,
+        'Bal QtY': 2600,
+        'Delivery Date': '30.09.2026',
       },
     ];
 
     const ws = XLSX.utils.json_to_sheet(sampleRows);
     const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'SAP_VA05_Template');
-    XLSX.writeFile(wb, `SAP_VA05_Sample_Template.xlsx`);
+    XLSX.utils.book_append_sheet(wb, ws, 'Planning Sheet');
+    XLSX.writeFile(wb, `Planning_Sheet_Sample_Template.xlsx`);
   };
 
   return (
@@ -506,9 +456,9 @@ export const VA05SampleFormModal: React.FC<VA05SampleFormModalProps> = ({
               <FileSpreadsheet className="w-5 h-5" />
             </div>
             <div>
-              <h2 className="text-base font-bold tracking-tight">SAP VA05 Order Entry & Sample Form</h2>
+              <h2 className="text-base font-bold tracking-tight">Planning Sheet Order Entry & Sample Form</h2>
               <p className="text-xs text-slate-400">
-                Directly input custom VA05 order lines or load pre-configured realistic SAP sales orders
+                Directly input custom order lines or load pre-configured sample Planning Sheet orders
               </p>
             </div>
           </div>
@@ -573,7 +523,7 @@ export const VA05SampleFormModal: React.FC<VA05SampleFormModalProps> = ({
               type="button"
               onClick={handleDownloadSampleExcel}
               className="flex items-center space-x-1.5 px-3 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 text-xs font-bold rounded-md shadow-2xs transition-colors cursor-pointer"
-              title="Download empty/sample SAP VA05 Excel template (.xlsx)"
+              title="Download factory Planning Sheet template (.xlsx) — planning headers only"
             >
               <Download className="w-3.5 h-3.5 text-emerald-600" />
               <span>Download Excel Template</span>
@@ -893,7 +843,7 @@ export const VA05SampleFormModal: React.FC<VA05SampleFormModalProps> = ({
             className="flex items-center space-x-2 px-6 py-2.5 bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold rounded-xl shadow-md shadow-emerald-700/20 transition-colors cursor-pointer"
           >
             <Plus className="w-4 h-4" />
-            <span>Add Order to Pending VA05 Queue</span>
+            <span>Add Order to Pending Queue</span>
           </button>
         </div>
       </div>

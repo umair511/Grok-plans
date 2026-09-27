@@ -2,6 +2,10 @@ import { FilmMaster, PlanningRules } from '../types';
 
 export const MIN_SLIT_WIDTH_MM = 355;
 
+/** Selectable PS mother deckles (trim window unchanged). Default 10400. */
+export const PS_DECKLE_OPTIONS = [10400, 8700] as const;
+export type PSDeckleOption = (typeof PS_DECKLE_OPTIONS)[number];
+
 export const DEFAULT_PLANNING_RULES: PlanningRules = {
   id: 'rule-v1.2',
   version: '1.2',

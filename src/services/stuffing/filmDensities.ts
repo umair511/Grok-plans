@@ -167,7 +167,10 @@ export const BASELINE_FILM_DENSITIES_DATABASE: FilmDensityMaster[] = [
   { code: 'MATTWL18', thickness: 18, density: 0.84, summary_code: 'MATTWL18', plant: 'IPAK' },
   { code: 'MATTWL20', thickness: 20, density: 0.84, summary_code: 'MATTWL20', plant: 'IPAK' },
   { code: 'MATTWL30', thickness: 30, density: 0.84, summary_code: 'MATTWL30', plant: 'IPAK' },
-  { code: 'MATTPL12', thickness: 12, density: 0.82, summary_code: 'MATTPL12', plant: 'IPAK' },
+  { code: 'MATTPL12', thickness: 12, density: 0.82, summary_code: 'MATTPL12', plant: 'IPAK', rejected_material: 'R-MATTPL12' },
+  // Pearl / SS-routed fixed-1705 films (required for SS + PS-engine worker path — no localStorage in worker)
+  { code: 'TNBPL10', thickness: 10, density: 0.70, summary_code: 'TNBPL10', plant: 'IPAK', rejected_material: 'R-TNBPL10' },
+  { code: 'TNBPL-10', thickness: 10, density: 0.70, summary_code: 'TNBPL10', plant: 'IPAK', rejected_material: 'R-TNBPL10' },
   { code: 'MATTPL15', thickness: 15, density: 0.84, summary_code: 'MATTPL15', plant: 'IPAK' },
 
   // Solid White / Pearlized / Opaque (Density 0.62 - 0.95)
@@ -190,10 +193,15 @@ export const BASELINE_FILM_DENSITIES_DATABASE: FilmDensityMaster[] = [
   { code: 'TNIT25', thickness: 25, density: 0.91, summary_code: 'TNT25', plant: 'IPAK' },
   { code: 'TNIT-35', thickness: 35, density: 0.91, summary_code: 'TNIT-35', plant: 'IPAK' },
   { code: 'THOW18', thickness: 18, density: 0.91, summary_code: 'THW18', plant: 'IPAK' },
+  { code: 'THO18', thickness: 18, density: 0.91, summary_code: 'THW18', plant: 'IPAK' },
   { code: 'THOW20', thickness: 20, density: 0.91, summary_code: 'THW20', plant: 'IPAK' },
+  { code: 'THO20', thickness: 20, density: 0.91, summary_code: 'THW20', plant: 'IPAK' },
   { code: 'THOW25', thickness: 25, density: 0.91, summary_code: 'THW25', plant: 'IPAK' },
+  { code: 'THO25', thickness: 25, density: 0.91, summary_code: 'THW25', plant: 'IPAK' },
   { code: 'THOW30', thickness: 30, density: 0.91, summary_code: 'THW30', plant: 'IPAK' },
+  { code: 'THO30', thickness: 30, density: 0.91, summary_code: 'THW30', plant: 'IPAK' },
   { code: 'THOW40', thickness: 40, density: 0.91, summary_code: 'THW40', plant: 'IPAK' },
+  { code: 'THO40', thickness: 40, density: 0.91, summary_code: 'THW40', plant: 'IPAK' },
   { code: 'TC20-20', thickness: 20, density: 0.91, summary_code: 'TC20', plant: 'IPAK' },
   { code: 'TC20A-23', thickness: 23, density: 0.91, summary_code: 'TC23', plant: 'IPAK' },
   { code: 'STN02-12', thickness: 12, density: 0.91, summary_code: 'STN12', plant: 'IPAK' },
@@ -206,6 +214,31 @@ export const FILM_DENSITIES_DATABASE: FilmDensityMaster[] = BASELINE_FILM_DENSIT
 // In-memory cache for fast lookups
 let cachedFilmSpecsDb: FilmDensityMaster[] | null = null;
 let cachedDensityMap: Map<string, FilmDensityMaster> | null = null;
+
+export function invalidateFilmSpecsCache(): void {
+  cachedFilmSpecsDb = null;
+  cachedDensityMap = null;
+}
+
+/**
+ * Permanent planning entry-point for density.
+ * Always reloads from localStorage so a just-saved film (any code) is visible
+ * on the main thread and can be posted into workers (workers have no localStorage).
+ * Use this for: pre-flight density checks AND every worker postMessage.filmSpecs.
+ */
+export function getFilmSpecsSnapshotForPlanning(): FilmDensityMaster[] {
+  invalidateFilmSpecsCache();
+  const db = getFilmSpecsDatabase();
+  // Structured clone-safe plain objects for worker postMessage
+  return db.map(s => ({
+    code: s.code,
+    thickness: s.thickness,
+    density: s.density,
+    summary_code: s.summary_code,
+    plant: s.plant,
+    rejected_material: s.rejected_material,
+  }));
+}
 
 function rebuildCache(specs: FilmDensityMaster[]) {
   cachedFilmSpecsDb = specs;
@@ -245,7 +278,7 @@ export function getFilmSpecsDatabase(): FilmDensityMaster[] {
           .map((x: any) => ({
             code: x.code.trim(),
             thickness: Number(x.thickness) || 20,
-            density: Number(x.density) || 0.91,
+            density: Number(x.density) > 0 ? Number(x.density) : 0,
             summary_code: (x.summary_code || x.code).trim(),
             plant: x.plant || 'IPAK',
             rejected_material: x.rejected_material
@@ -285,6 +318,27 @@ export function saveFilmSpecsDatabase(specs: FilmDensityMaster[]): void {
       console.error('Failed to save film specs database to localStorage:', e);
     }
   }
+}
+
+/**
+ * Seed / refresh in-memory density cache (Web Workers have no localStorage).
+ * Main thread must pass getFilmSpecsDatabase() on every synthesis / plan message.
+ */
+export function hydrateFilmSpecsCache(specs: FilmDensityMaster[] | null | undefined): void {
+  if (!specs || !Array.isArray(specs) || specs.length === 0) return;
+  // Exact Film Specs Master DB snapshot from main-thread localStorage — no hardcoded merge
+  const validList: FilmDensityMaster[] = specs
+    .filter((x: any) => x && typeof x.code === 'string' && x.code.trim() !== '')
+    .map((x: any) => ({
+      code: String(x.code).trim(),
+      thickness: Number(x.thickness) > 0 ? Number(x.thickness) : 0,
+      density: Number(x.density) > 0 ? Number(x.density) : 0,
+      summary_code: String(x.summary_code || x.code).trim(),
+      plant: x.plant || 'IPAK',
+      rejected_material: x.rejected_material,
+    }));
+  if (validList.length === 0) return;
+  rebuildCache(validList);
 }
 
 /**
@@ -410,6 +464,37 @@ export function resetFilmSpecsToDefault(): FilmDensityMaster[] {
  * If the film code is NOT found in the Master Database, returns NULL.
  * NEVER guesses, assumes, or derives thickness, density, or grammage.
  */
+/**
+ * Strict density for planning engines. Returns null if film not in Film Specs Master DB.
+ * Callers MUST NOT invent 0.91 — prompt planner to add density in Film Specs Master.
+ */
+export function resolveFilmDensity(filmCode: string): number | null {
+  const specs = lookupFilmSpecs(filmCode);
+  if (specs && specs.is_found && specs.density > 0) return specs.density;
+  return null; // Master DB only — never invent / hardcode density
+}
+
+export function resolveFilmThickness(filmCode: string): number | null {
+  const specs = lookupFilmSpecs(filmCode);
+  if (!specs || !specs.is_found || !(specs.thickness > 0)) return null;
+  return specs.thickness;
+}
+
+/** Films among codes that lack density in the master DB. */
+export function findFilmsMissingDensity(filmCodes: string[]): string[] {
+  const missing: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of filmCodes) {
+    const code = (raw || '').trim();
+    if (!code) continue;
+    const key = code.toUpperCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (resolveFilmDensity(code) == null) missing.push(code);
+  }
+  return missing;
+}
+
 export function lookupFilmSpecs(
   filmCode: string,
   customDb?: FilmDensityMaster[]
@@ -462,6 +547,26 @@ export function lookupFilmSpecs(
       summary_code: found.summary_code || found.code,
       is_found: true
     };
+  }
+
+  // Soft aliases: factory short codes → catalog codes (e.g. THO18 → THOW18)
+  const aliasCandidates: string[] = [];
+  const tho = normalized.match(/^THO(\d+)$/i);
+  if (tho) aliasCandidates.push(`THOW${tho[1]}`);
+  const thow = normalized.match(/^THOW(\d+)$/i);
+  if (thow) aliasCandidates.push(`THO${thow[1]}`);
+  for (const alt of aliasCandidates) {
+    const altClean = alt.replace(/[\s_-]/g, '');
+    const found = cachedDensityMap?.get(alt) || cachedDensityMap?.get(altClean);
+    if (found) {
+      return {
+        thickness: found.thickness,
+        density: found.density,
+        plant: found.plant || 'IPAK',
+        summary_code: found.summary_code || found.code,
+        is_found: true
+      };
+    }
   }
 
   // STRICT RULE: Unknown film code returns null.

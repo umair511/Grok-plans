@@ -1,3 +1,4 @@
+import { resolveFilmDensity, findFilmsMissingDensity } from '../stuffing/filmDensities';
 import { VA05Order } from '../../types';
 import { 
   JumboRoll, 
@@ -268,6 +269,11 @@ function optimizeDemandPool(
   startReqCounter: number = 1
 ): { requirements: JumboRequirement[]; score: number; evaluation: OptimizationStrategyEvaluation } {
   const settings = { ...DEFAULT_METALLIZER_SETTINGS, ...rawSettings };
+  // Default: 3-UPS only. 4-UPS search/fallback only when planner enables allow_4_ups.
+  const allow4Ups = settings.allow_4_ups === true;
+  const motherDeckle = Number(settings.ps01_deckle_width_mm) > 0
+    ? Number(settings.ps01_deckle_width_mm)
+    : 10400;
   if (groupOrders.length === 0) {
     return {
       requirements: [],
@@ -294,7 +300,24 @@ function optimizeDemandPool(
 
   const filmsInGroup = Array.from(new Set(groupOrders.map(o => o.film)));
   const thickness = groupOrders[0].thickness_micron || settings.thickness_micron_default;
-  const density = settings.density || 0.91;
+  const filmCodesForDensity = Array.from(new Set(groupOrders.map(o => o.film).filter(Boolean)));
+  const missingDens = filmCodesForDensity.filter(f => {
+    if (resolveFilmDensity(f) != null) return false;
+    return !groupOrders.some(o => o.film === f && Number(o.density) > 0);
+  });
+  if (missingDens.length > 0) {
+    throw new Error(
+      `Density not saved in Film Specs Master Database for: ${missingDens.join(', ')}. ` +
+      `Open Master Backlog → Film Specs Master DB and add density before MSL planning.`
+    );
+  }
+  const density =
+    resolveFilmDensity(filmCodesForDensity[0] || '') ||
+    Number(groupOrders.find(o => Number(o.density) > 0)?.density) ||
+    0;
+  if (!(density > 0)) {
+    throw new Error(`Density not saved for film(s): ${filmCodesForDensity.join(', ')}.`);
+  }
   const maxMslUps = Math.min(6, settings.max_planning_ups || 6);
 
   // Phase-1: memoize pure weight formula
@@ -651,7 +674,7 @@ function optimizeDemandPool(
   const finalRequirements: JumboRequirement[] = [];
   let reqCounter = startReqCounter;
   let iteration = 0;
-  const maxIterations = 100;
+  const maxIterations = 250;
   let activeCampaignJumboWidth: number | null = null;
   let activeCampaignSlitWidths: number[] = [];
 
@@ -676,8 +699,21 @@ function optimizeDemandPool(
       if (!trackerBySlot[tr.slotIdx]) trackerBySlot[tr.slotIdx] = tr;
     }
 
+    // STRICT priority (PS-style): while any starred order has residual demand, only
+    // accept patterns that cover at least one priority slot. Priority fulfillment
+    // dominates even if non-priority residual is left for later / lost.
+    const prioritySlotSet = new Set(
+      activeTrackers.filter(t => !!t.order.priority && t.remainingKg > 0.01).map(t => t.slotIdx)
+    );
+    let strictPriorityMode = prioritySlotSet.size > 0;
+
     const activeSlotsSet = new Set(activeTrackers.map(t => t.slotIdx));
-    liveCandidates = liveCandidates.filter(c => c.activeIndices.every(s => activeSlotsSet.has(s)));
+    // Refilter from MASTER each iteration (do not permanently shrink).
+    // Keep candidates that still touch at least one active slot — mixed patterns
+    // remain available so companion widths can help close residual demand.
+    liveCandidates = masterCandidatePool.filter(c =>
+      c.activeIndices.some(s => activeSlotsSet.has(s))
+    );
     const candidatePool = liveCandidates;
     if (candidatePool.length === 0) break;
 
@@ -695,24 +731,53 @@ function optimizeDemandPool(
     const isBetter3UpsCandidate = (cand: WinningSetResult, current: WinningSetResult | null): boolean => {
       if (!current) return true;
 
-      // Quality priority: GREEN beats YELLOW
+      // STRICT: priority kg / closed dominates all other criteria
+      const prioCand = (cand as any).priorityKg ?? 0;
+      const prioCur = (current as any).priorityKg ?? 0;
+      if (strictPriorityMode) {
+        if (Math.abs(prioCand - prioCur) > 0.01) return prioCand > prioCur;
+        const pc = (cand as any).priorityClosed ?? 0;
+        const pr = (current as any).priorityClosed ?? 0;
+        if (pc !== pr) return pc > pr;
+      }
+
+      // Quality priority: GREEN beats YELLOW (stay in green PS01 zone when possible)
       if (cand.status === 'GREEN' && current.status !== 'GREEN') return true;
       if (current.status === 'GREEN' && cand.status !== 'GREEN') return false;
 
-      // 1. Primary criterion: Maximum REAL customer-fulfilled kg
-      const kgDiff = cand.totalPlannedKg - current.totalPlannedKg;
+      const candKg = cand.realFulfilledKg ?? cand.totalPlannedKg;
+      const currKg = current.realFulfilledKg ?? current.totalPlannedKg;
+      const candDia = cand.candidates[0]?.jumboDiameterMm || 0;
+      const currDia = current.candidates[0]?.jumboDiameterMm || 0;
+      const candMult = cand.candidates[0]?.packageMultiple || 1;
+      const currMult = current.candidates[0]?.packageMultiple || 1;
+
+      // Near-max diameter FIRST (factory rule): larger package / OD wins unless kg is much worse (>25%)
+      const maxKg = Math.max(candKg, currKg, 0.01);
+      if (candMult !== currMult) {
+        const kgRatio = candKg / maxKg;
+        const otherRatio = currKg / maxKg;
+        // Prefer higher multiple unless it delivers <75% of the other's fulfilled kg
+        if (candMult > currMult && kgRatio >= 0.75 * otherRatio) return true;
+        if (currMult > candMult && otherRatio >= 0.75 * kgRatio) return false;
+      }
+      if (Math.abs(candDia - currDia) > 20) {
+        if (candDia > currDia && candKg >= 0.75 * currKg) return true;
+        if (currDia > candDia && currKg >= 0.75 * candKg) return false;
+      }
+
+      // Then maximum REAL customer-fulfilled kg
+      const kgDiff = candKg - currKg;
       if (Math.abs(kgDiff) > 0.01) {
         return kgDiff > 0;
       }
 
-      // 2. More closed customer orders
+      // More closed customer orders
       if (cand.closedCount !== current.closedCount) {
         return cand.closedCount > current.closedCount;
       }
 
-      // 3. Better jumbo utilization / practical diameter
-      const candDia = cand.candidates[0]?.jumboDiameterMm || 0;
-      const currDia = current.candidates[0]?.jumboDiameterMm || 0;
+      // Diameter tie-break
       if (Math.abs(candDia - currDia) > 1) {
         return candDia > currDia;
       }
@@ -747,24 +812,52 @@ function optimizeDemandPool(
     const isBetter4UpsCandidate = (cand: WinningSetResult, current: WinningSetResult | null): boolean => {
       if (!current) return true;
 
-      // Quality priority: GREEN beats YELLOW
+      if (strictPriorityMode) {
+        const prioCand = (cand as any).priorityKg ?? 0;
+        const prioCur = (current as any).priorityKg ?? 0;
+        if (Math.abs(prioCand - prioCur) > 0.01) return prioCand > prioCur;
+        const pc = (cand as any).priorityClosed ?? 0;
+        const pr = (current as any).priorityClosed ?? 0;
+        if (pc !== pr) return pc > pr;
+      }
+
+      // Quality priority: GREEN beats YELLOW (stay in green PS01 zone when possible)
       if (cand.status === 'GREEN' && current.status !== 'GREEN') return true;
       if (current.status === 'GREEN' && cand.status !== 'GREEN') return false;
 
-      // 1. Primary criterion: Maximum REAL customer-fulfilled kg
-      const kgDiff = cand.totalPlannedKg - current.totalPlannedKg;
+      const candKg = cand.realFulfilledKg ?? cand.totalPlannedKg;
+      const currKg = current.realFulfilledKg ?? current.totalPlannedKg;
+      const candDia = cand.candidates[0]?.jumboDiameterMm || 0;
+      const currDia = current.candidates[0]?.jumboDiameterMm || 0;
+      const candMult = cand.candidates[0]?.packageMultiple || 1;
+      const currMult = current.candidates[0]?.packageMultiple || 1;
+
+      // Near-max diameter FIRST (factory rule): larger package / OD wins unless kg is much worse (>25%)
+      const maxKg = Math.max(candKg, currKg, 0.01);
+      if (candMult !== currMult) {
+        const kgRatio = candKg / maxKg;
+        const otherRatio = currKg / maxKg;
+        // Prefer higher multiple unless it delivers <75% of the other's fulfilled kg
+        if (candMult > currMult && kgRatio >= 0.75 * otherRatio) return true;
+        if (currMult > candMult && otherRatio >= 0.75 * kgRatio) return false;
+      }
+      if (Math.abs(candDia - currDia) > 20) {
+        if (candDia > currDia && candKg >= 0.75 * currKg) return true;
+        if (currDia > candDia && currKg >= 0.75 * candKg) return false;
+      }
+
+      // Then maximum REAL customer-fulfilled kg
+      const kgDiff = candKg - currKg;
       if (Math.abs(kgDiff) > 0.01) {
         return kgDiff > 0;
       }
 
-      // 2. More closed customer orders
+      // More closed customer orders
       if (cand.closedCount !== current.closedCount) {
         return cand.closedCount > current.closedCount;
       }
 
-      // 3. Better jumbo utilization / practical diameter
-      const candDia = cand.candidates[0]?.jumboDiameterMm || 0;
-      const currDia = current.candidates[0]?.jumboDiameterMm || 0;
+      // Diameter tie-break
       if (Math.abs(candDia - currDia) > 1) {
         return candDia > currDia;
       }
@@ -800,10 +893,33 @@ function optimizeDemandPool(
     const runSearchPass = (allowTailMultiples: boolean) => {
       for (const fam of lengthFamilies) {
         const maxMultipleInFam = Math.max(...fam.validMultiples.map(v => v.multiple));
-        for (const vm of fam.validMultiples) {
+        const maxDiaInFam = Math.max(...fam.validMultiples.map(v => v.diameter_mm));
+        // Near-max diameter band: ≥88% of family max OD (or top multiple / top-1)
+        const nearMaxMultiples = fam.validMultiples.filter(v => {
+          if (maxMultipleInFam <= 1) return true;
+          if (v.multiple >= maxMultipleInFam - 1) return true;
+          if (v.diameter_mm >= maxDiaInFam * 0.88) return true;
+          return false;
+        });
+        const multiplesToScan = allowTailMultiples
+          ? fam.validMultiples
+          : (nearMaxMultiples.length ? nearMaxMultiples : fam.validMultiples);
+
+        for (const vm of multiplesToScan) {
           const isTail = maxMultipleInFam > 1 && vm.multiple === 1;
           if (isTail && !allowTailMultiples) continue;
-          if (!isTail && allowTailMultiples) continue;
+          // Phase 1: skip non-near-max mid tiers entirely
+          if (!allowTailMultiples && maxMultipleInFam > 1) {
+            const isNearMax =
+              vm.multiple >= maxMultipleInFam - 1 ||
+              vm.diameter_mm >= maxDiaInFam * 0.88;
+            if (!isNearMax) continue;
+          }
+          // Phase 2 (tail mode): prefer scanning mid/low only after near-max already failed outer pass
+          if (allowTailMultiples && !isTail) {
+            // still allow mid multiples in phase 2 only if they are the remaining option
+            // (near-max already tried in phase 1)
+          }
 
           let best3UpsWinningSet: WinningSetResult | null = null;
           let best4UpsWinningSet: WinningSetResult | null = null;
@@ -995,10 +1111,13 @@ function optimizeDemandPool(
 
       // 1. PRIORITY #1: PURE SINGLE-CANDIDATE 3-UPS & 4-UPS PACKS (High Volume Pure Runs with 0 Surplus)
       const searchPurePacks = (minTrimAllowed: number, maxTrimAllowed: number) => {
+        // Floor at plant RED boundary: PS01 trim may never go below 150 mm
+        minTrimAllowed = Math.max(150, minTrimAllowed);
+        maxTrimAllowed = Math.min(500, maxTrimAllowed);
         for (const cand of viableCandidates) {
           // Check 3-UPS Pure Pack (3 x candidate)
           const totalWeb3 = cand.jumboWidth * 3;
-          const trim3 = 10400 - totalWeb3;
+          const trim3 = motherDeckle - totalWeb3;
           if (trim3 >= minTrimAllowed && trim3 <= maxTrimAllowed && trim3 >= 150 && trim3 <= 500) {
             const status3: 'GREEN' | 'YELLOW' = (trim3 >= 150 && trim3 <= 280) ? 'GREEN' : 'YELLOW';
             let maxCycles3 = Infinity;
@@ -1042,9 +1161,11 @@ function optimizeDemandPool(
               score += 150000; // Bonus for 3-UPS pure pack (0 setup changes, max throughput)
               if (repeatCycles >= 3) score += 75000; // High-volume sustained pure pack bonus
               if (new Set(cand.combo.widths).size === 1) score += 75000; // Single-width repeat bonus (zero knife shift)
+              if (cand.jumboDiameterMm < 900) score -= 350000; // penalize small-OD jumbos
+              else if (cand.jumboDiameterMm < 1050) score -= 120000;
               score += Math.max(0, (500 - trim3) * 50); // Trim tightness bonus
-              score += cand.packageMultiple * 50000;
-              score += (cand.jumboDiameterMm / 1250) * 100000; // Target diameter (~1250mm) bonus
+              score += cand.packageMultiple * 200000;
+              score += (cand.jumboDiameterMm / 1250) * 400000; // Hard near-max diameter (~1250mm) bias
               score += repeatCycles * 3000;
               const wastePct = totalTrimKg > 0 ? (totalTrimKg / (cyclePlannedKg + totalTrimKg)) * 100 : 0;
               score -= wastePct * 100;
@@ -1052,6 +1173,8 @@ function optimizeDemandPool(
               // Order closure bonus: reward patterns that cleanly close companion orders (remainingKg <= 0.01)
               let closedCount3 = 0;
               let realFulfilledKg3 = 0;
+              let priorityKg3 = 0;
+              let priorityClosed3 = 0;
               for (let a = 0; a < cand.activeIndices.length; a++) {
                 const s = cand.activeIndices[a];
                 const tr = trackerBySlot[s];
@@ -1061,9 +1184,17 @@ function optimizeDemandPool(
                   if (tr.remainingKg - cutKg <= 0.01) {
                     closedCount3++;
                   }
+                  if (tr.order.priority && prioritySlotSet.has(s)) {
+                    priorityKg3 += Math.min(tr.remainingKg, cutKg);
+                    if (tr.remainingKg - cutKg <= 0.01) priorityClosed3++;
+                  }
                 }
               }
+              // Skip patterns that ignore starred residual while priority mode is on
+              if (strictPriorityMode && priorityKg3 < 0.01) continue;
               score += closedCount3 * 35000;
+              score += priorityKg3 * 500000;
+              score += priorityClosed3 * 5000000;
 
               // Campaign Setup Continuity Bonus: reusing active jumbo width saves full PS01 changeover (+120,000)
               if (activeCampaignJumboWidth !== null && cand.jumboWidth === activeCampaignJumboWidth) {
@@ -1089,16 +1220,19 @@ function optimizeDemandPool(
                 totalTrimKg,
                 closedCount: closedCount3,
                 score,
-              };
+                priorityKg: priorityKg3,
+                priorityClosed: priorityClosed3,
+              } as WinningSetResult;
               if (isBetter3UpsCandidate(pure3Set, best3UpsWinningSet)) {
                 best3UpsWinningSet = pure3Set;
               }
             }
           }
 
-          // Check 4-UPS Pure Pack (4 x candidate, for jumbo widths <= 2565mm)
+          // Check 4-UPS Pure Pack — only when planner enabled allow_4_ups
+          if (allow4Ups) {
           const totalWeb4 = cand.jumboWidth * 4;
-          const trim4 = 10400 - totalWeb4;
+          const trim4 = motherDeckle - totalWeb4;
           if (trim4 >= minTrimAllowed && trim4 <= maxTrimAllowed && trim4 >= 150 && trim4 <= 500) {
             const status4: 'GREEN' | 'YELLOW' = (trim4 >= 150 && trim4 <= 280) ? 'GREEN' : 'YELLOW';
             let maxCycles4 = Infinity;
@@ -1143,8 +1277,8 @@ function optimizeDemandPool(
               if (repeatCycles >= 3) score += 50000; // High-volume sustained pure pack bonus
               if (new Set(cand.combo.widths).size === 1) score += 50000; // Single-width repeat bonus (zero knife shift)
               score += Math.max(0, (500 - trim4) * 50); // Trim tightness bonus
-              score += cand.packageMultiple * 50000;
-              score += (cand.jumboDiameterMm / 1250) * 100000; // Target diameter (~1250mm) bonus
+              score += cand.packageMultiple * 200000;
+              score += (cand.jumboDiameterMm / 1250) * 400000; // Hard near-max diameter (~1250mm) bias
               score += repeatCycles * 3000;
               const wastePct = totalTrimKg > 0 ? (totalTrimKg / (cyclePlannedKg + totalTrimKg)) * 100 : 0;
               score -= wastePct * 100;
@@ -1152,6 +1286,8 @@ function optimizeDemandPool(
               // Order closure bonus: reward patterns that cleanly close companion orders (remainingKg <= 0.01)
               let closedCount4 = 0;
               let realFulfilledKg4 = 0;
+              let priorityKg4 = 0;
+              let priorityClosed4 = 0;
               for (let a = 0; a < cand.activeIndices.length; a++) {
                 const s = cand.activeIndices[a];
                 const tr = trackerBySlot[s];
@@ -1161,9 +1297,16 @@ function optimizeDemandPool(
                   if (tr.remainingKg - cutKg <= 0.01) {
                     closedCount4++;
                   }
+                  if (tr.order.priority && prioritySlotSet.has(s)) {
+                    priorityKg4 += Math.min(tr.remainingKg, cutKg);
+                    if (tr.remainingKg - cutKg <= 0.01) priorityClosed4++;
+                  }
                 }
               }
+              if (strictPriorityMode && priorityKg4 < 0.01) continue;
               score += closedCount4 * 20000;
+              score += priorityKg4 * 500000;
+              score += priorityClosed4 * 5000000;
 
               // Campaign Setup Continuity Bonus for 4-UPS
               if (activeCampaignJumboWidth !== null && cand.jumboWidth === activeCampaignJumboWidth) {
@@ -1188,17 +1331,23 @@ function optimizeDemandPool(
                 totalTrimKg,
                 closedCount: closedCount4,
                 score,
-              };
+                priorityKg: priorityKg4,
+                priorityClosed: priorityClosed4,
+              } as WinningSetResult;
               if (isBetter4UpsCandidate(pure4Set, best4UpsWinningSet)) {
                 best4UpsWinningSet = pure4Set;
               }
             }
           }
+          } // end allow4Ups pure 4-UPS
         }
       };
 
       // 2. PRIORITY #2: MULTI-ORDER SYNCHRONIZED TRIPLETS SEARCH
       const searchTriplets = (minTrimAllowed: number, maxTrimAllowed: number) => {
+        minTrimAllowed = Math.max(150, minTrimAllowed);
+        maxTrimAllowed = Math.min(500, maxTrimAllowed);
+
         for (let i = 0; i < numUniqueWidths; i++) {
           const w1 = uniqueWidths[i];
           const list1 = candidatesByWidth.get(w1)!;
@@ -1207,8 +1356,8 @@ function optimizeDemandPool(
             const w2 = uniqueWidths[j];
             const list2 = candidatesByWidth.get(w2)!;
 
-            const minW3 = Math.max(w2, 10400 - w1 - w2 - maxTrimAllowed);
-            const maxW3 = Math.min(settings.max_jumbo_width_mm, 10400 - w1 - w2 - minTrimAllowed);
+            const minW3 = Math.max(w2, motherDeckle - w1 - w2 - maxTrimAllowed);
+            const maxW3 = Math.min(settings.max_jumbo_width_mm, motherDeckle - w1 - w2 - minTrimAllowed);
             if (minW3 > maxW3) continue;
 
             const startK = binarySearchLower(uniqueWidths, minW3, j, numUniqueWidths - 1);
@@ -1218,7 +1367,7 @@ function optimizeDemandPool(
             for (let k = startK; k <= endK; k++) {
               const w3 = uniqueWidths[k];
               const totalWeb = w1 + w2 + w3;
-              const ps01Trim = 10400 - totalWeb;
+              const ps01Trim = motherDeckle - totalWeb;
               if (ps01Trim < 150 || ps01Trim > 500) continue;
 
               const status: 'GREEN' | 'YELLOW' = (ps01Trim >= 150 && ps01Trim <= 280) ? 'GREEN' : 'YELLOW';
@@ -1426,7 +1575,10 @@ function optimizeDemandPool(
 
       // 3. 4-UPS MEET-IN-THE-MIDDLE PAIR SEARCH (First-Class 4-Roll Pack Generation)
       const search4UpsPairs = (minTrimAllowed: number, maxTrimAllowed: number) => {
-        if (uniqueWidths.length === 0 || uniqueWidths[0] * 4 > 10400 - 120) return;
+        minTrimAllowed = Math.max(150, minTrimAllowed);
+        maxTrimAllowed = Math.min(500, maxTrimAllowed);
+
+        if (uniqueWidths.length === 0 || uniqueWidths[0] * 4 > motherDeckle - 150) return;
 
         interface CandidatePair {
           c1: MS1JumboCandidate;
@@ -1550,8 +1702,8 @@ function optimizeDemandPool(
           const sumA = uniquePairSums[pAIdx];
           const pairsA = pairsBySum.get(sumA)!;
 
-          const minSumB = Math.max(sumA, 10400 - sumA - maxTrimAllowed);
-          const maxSumB = 10400 - sumA - minTrimAllowed;
+          const minSumB = Math.max(sumA, motherDeckle - sumA - maxTrimAllowed);
+          const maxSumB = motherDeckle - sumA - minTrimAllowed;
           if (minSumB > maxSumB) continue;
 
           const startB = binarySearchLower(uniquePairSums, minSumB, pAIdx, numPairSums - 1);
@@ -1563,7 +1715,7 @@ function optimizeDemandPool(
             const pairsB = pairsBySum.get(sumB)!;
 
             const totalWeb = sumA + sumB;
-            const ps01Trim = 10400 - totalWeb;
+            const ps01Trim = motherDeckle - totalWeb;
             if (ps01Trim < 150 || ps01Trim > 500) continue;
 
             const status: 'GREEN' | 'YELLOW' = (ps01Trim >= 150 && ps01Trim <= 280) ? 'GREEN' : 'YELLOW';
@@ -1703,40 +1855,36 @@ function optimizeDemandPool(
         }
       };
 
-      // 1. PRIMARY: SEARCH ALL GREEN CONFIGURATIONS FIRST (Pure, 3-UPS Mixed Triplets, 4-UPS Mixed Pairs)
+      // 1. PRIMARY: GREEN search — 3-UPS always; 4-UPS only if allow_4_ups
       searchPurePacks(150, 280);
       searchTriplets(150, 280);
-      search4UpsPairs(150, 280);
+      if (allow4Ups) search4UpsPairs(150, 280);
 
-      // 2. FALLBACK TO YELLOW TRIM [281-500mm] ONLY IF NEITHER 3-UPS NOR 4-UPS FORMED A GREEN PACK
+      // 2. YELLOW fallback only if no GREEN pack formed
       const hasGreen3Ups = best3UpsWinningSet && best3UpsWinningSet.status === 'GREEN';
-      const hasGreen4Ups = best4UpsWinningSet && best4UpsWinningSet.status === 'GREEN';
+      const hasGreen4Ups = allow4Ups && best4UpsWinningSet && best4UpsWinningSet.status === 'GREEN';
 
       if (!hasGreen3Ups && !hasGreen4Ups) {
         searchPurePacks(281, 500);
         searchTriplets(281, 500);
-        search4UpsPairs(281, 500);
+        if (allow4Ups) search4UpsPairs(281, 500);
       }
 
-      // DECISION HIERARCHY: 3-UPS FIRST, 4-UPS ONLY AS FALLBACK
-      // Maximize 3-UPS jumbo plans without blocking fulfillment:
-      //  - If a valid 3-UPS set exists → always prefer it (same or better trim quality)
-      //  - 4-UPS wins only when no 3-UPS set exists, or when 4-UPS is GREEN and 3-UPS is YELLOW
-      // Residual demand in later iterations can still form 4-UPS when 3-UPS cannot.
-      if (!best3UpsWinningSet && !best4UpsWinningSet) {
+      // DECISION: default 3-UPS only. When allow_4_ups: 3-UPS first, 4-UPS fallback (previous logic).
+      if (!allow4Ups) {
+        bestWinningSet = best3UpsWinningSet;
+      } else if (!best3UpsWinningSet && !best4UpsWinningSet) {
         bestWinningSet = null;
       } else if (!best3UpsWinningSet) {
         bestWinningSet = best4UpsWinningSet;
       } else if (!best4UpsWinningSet) {
         bestWinningSet = best3UpsWinningSet;
       } else {
-        // Both valid: GREEN quality still beats YELLOW
         if (best3UpsWinningSet.status === 'GREEN' && best4UpsWinningSet.status !== 'GREEN') {
           bestWinningSet = best3UpsWinningSet;
         } else if (best4UpsWinningSet.status === 'GREEN' && best3UpsWinningSet.status !== 'GREEN') {
           bestWinningSet = best4UpsWinningSet;
         } else {
-          // Equal trim quality → always 3-UPS (plant preferred). No kg% override.
           bestWinningSet = best3UpsWinningSet;
         }
       }
@@ -1759,6 +1907,16 @@ function optimizeDemandPool(
       runSearchPass(true);
     }
 
+    // If priority-strict search found nothing, relax priority so remaining demand can still pack (GREEN first)
+    if (!bestWinningSet && strictPriorityMode) {
+      strictPriorityMode = false;
+      prioritySlotSet.clear();
+      runSearchPass(false);
+      if (!bestWinningSet) {
+        runSearchPass(true);
+      }
+    }
+
     // ALL PACKS ARE FULLY DEMAND-BACKED:
     // If no 3-UPS or 4-UPS combination can be formed from remaining active orders,
     // we strictly terminate with zero surplus rather than creating phantom/unallocated rolls.
@@ -1766,6 +1924,8 @@ function optimizeDemandPool(
 
     // ALLOCATE DEMAND AND DEDUCT FROM ORDER TRACKERS FOR THE WINNING SET
     const winning = bestWinningSet;
+    // HARD RULE: never emit plans with PS01 edge trim in RED zone (<150 or >500)
+    if (winning.ps01Trim < 150 || winning.ps01Trim > 500) break;
     const distinctCandidates = Array.from(new Set(winning.candidates));
     let totalAllocatedInIter = 0;
 
@@ -1883,13 +2043,13 @@ function optimizeDemandPool(
         ps01_feasibility: {
           status: winning.status,
           is_feasible: true,
-          ps01_deckle_mm: 10400,
+          ps01_deckle_mm: motherDeckle,
           jumbo_width_mm: cand.jumboWidth,
           ps01_ups: winning.ps01Ups,
           ps01_cut_combination: winning.jumboWidths,
           ps01_total_width_mm: winning.totalWeb,
           ps01_trim_mm: winning.ps01Trim,
-          ps01_deckle_efficiency_percent: Number(((winning.totalWeb / 10400) * 100).toFixed(2)),
+          ps01_deckle_efficiency_percent: Number(((winning.totalWeb / motherDeckle) * 100).toFixed(2)),
           ps01_duplex_balanced: true,
           side_a_ups: Math.ceil(winning.ps01Ups / 2),
           side_b_ups: Math.floor(winning.ps01Ups / 2),
@@ -1912,7 +2072,68 @@ function optimizeDemandPool(
       activeCampaignSlitWidths = winning.candidates[0].combo.widths;
     }
 
-    if (totalAllocatedInIter <= 0) break;
+    if (totalAllocatedInIter <= 0) continue;
+  }
+
+
+  // HARD RULE: drop any requirement whose PS01 edge trim fell below 150 mm (RED zone forbidden)
+  for (let i = finalRequirements.length - 1; i >= 0; i--) {
+    const trim = finalRequirements[i].ps01_feasibility?.ps01_trim_mm;
+    if (typeof trim === 'number' && (trim < 150 || trim > 500)) {
+      finalRequirements.splice(i, 1);
+    }
+  }
+
+  // Consolidate same-size jumbo packs: identical film + width + length + slit pattern + trim
+  // → one requirement with summed rolls (single PS mother pack story, not repeated 3405 lines)
+  {
+    const merged: JumboRequirement[] = [];
+    const byKey = new Map<string, JumboRequirement>();
+    for (const req of finalRequirements) {
+      const pattern = (req.finished_widths_covered || []).slice().sort((a, b) => a - b).join('x');
+      // Same physical pack identity — do not split on parent-run id or tiny trim jitter
+      const key = [
+        req.film,
+        req.required_jumbo_width_mm,
+        req.required_jumbo_length_m,
+        pattern,
+        req.ups,
+        req.package_multiple || 1,
+      ].join('|');
+      const existing = byKey.get(key);
+      if (!existing) {
+        byKey.set(key, { ...req, orders_covered: [...(req.orders_covered || [])] });
+        continue;
+      }
+      existing.required_rolls_count =
+        (existing.required_rolls_count || 0) + (req.required_rolls_count || 0);
+      existing.total_weight_kg = Number(
+        ((existing.total_weight_kg || 0) + (req.total_weight_kg || 0)).toFixed(2)
+      );
+      // Merge orders_covered by order_id
+      const covMap = new Map<string, (typeof existing.orders_covered)[0]>();
+      for (const oc of existing.orders_covered || []) {
+        covMap.set(String(oc.order_id || `${oc.sales_order}_${oc.item_number}`), { ...oc });
+      }
+      for (const oc of req.orders_covered || []) {
+        const id = String(oc.order_id || `${oc.sales_order}_${oc.item_number}`);
+        const prev = covMap.get(id);
+        if (prev) {
+          prev.required_reels = (prev.required_reels || 0) + (oc.required_reels || 0);
+          prev.weight_kg = Number(((prev.weight_kg || 0) + (oc.weight_kg || 0)).toFixed(2));
+        } else {
+          covMap.set(id, { ...oc });
+        }
+      }
+      existing.orders_covered = Array.from(covMap.values());
+      // Keep first parent deckle id so PS treats as one campaign family
+      if (!existing.ps01_parent_deckle_id && req.ps01_parent_deckle_id) {
+        existing.ps01_parent_deckle_id = req.ps01_parent_deckle_id;
+      }
+    }
+    for (const v of byKey.values()) merged.push(v);
+    finalRequirements.length = 0;
+    finalRequirements.push(...merged);
   }
 
   // Summary Metrics Calculation
@@ -2108,31 +2329,39 @@ function consolidateRequirements(requirements: JumboRequirement[]): JumboRequire
       const r2 = requirements[j];
       if (mergedIds.has(r2.id)) continue;
 
-      // Strict PS mother-run identity: requirements from different parent deckles must NEVER be consolidated
-      // or used to increase another parent run's repetitions. Missing parent ID does not permit cross-run merging.
-      const d1 = r1.ps01_parent_deckle_id;
-      const d2 = r2.ps01_parent_deckle_id;
-      const sameDeckle = (d1 && d2) ? d1 === d2 : (!d1 && !d2);
-      if (!sameDeckle) continue;
-
+      // Same physical jumbo identity may merge across iterative parent-run IDs
+      // (engine used to emit one ps01-run-N per loop pass → many 3405×3 rows).
+      // Different widths / lengths / cut patterns still stay separate.
       if (r1.film === r2.film &&
           r1.package_multiple === r2.package_multiple &&
-          r1.required_jumbo_length_m === r2.required_jumbo_length_m) {
+          r1.required_jumbo_length_m === r2.required_jumbo_length_m &&
+          Number(r1.required_jumbo_width_mm) === Number(r2.required_jumbo_width_mm) &&
+          Number(r1.ups || 0) === Number(r2.ups || 0)) {
         
-        const cuts1 = (r1.msl_pattern_summary?.cuts || []).map(c => c.width_mm).sort();
-        const cuts2 = (r2.msl_pattern_summary?.cuts || []).map(c => c.width_mm).sort();
+        const cuts1 = (r1.msl_pattern_summary?.cuts || []).map(c => c.width_mm).sort((a, b) => a - b);
+        const cuts2 = (r2.msl_pattern_summary?.cuts || []).map(c => c.width_mm).sort((a, b) => a - b);
+        // Also accept finished_widths_covered when msl_pattern_summary cuts empty
+        const fw1 = (r1.finished_widths_covered || []).slice().sort((a, b) => a - b);
+        const fw2 = (r2.finished_widths_covered || []).slice().sort((a, b) => a - b);
+        const cutsMatch =
+          (cuts1.length > 0 && cuts1.length === cuts2.length && cuts1.every((w, idx) => w === cuts2[idx])) ||
+          (cuts1.length === 0 && fw1.length > 0 && fw1.length === fw2.length && fw1.every((w, idx) => w === fw2[idx]));
         
-        if (cuts1.length > 0 && cuts1.length === cuts2.length && cuts1.every((w, idx) => w === cuts2[idx])) {
+        if (cutsMatch) {
+          // Same film + jumbo width + length + UPS + slit pattern → one pack line
+          // (trim already validated when each requirement was emitted)
           const chosenWidth = Math.min(r1.required_jumbo_width_mm, r2.required_jumbo_width_mm);
-          const cutsSum = cuts1.reduce((a, b) => a + b, 0);
-          const trim = chosenWidth - cutsSum;
-          if (trim >= 18 && trim <= 45) {
-            r1.required_rolls_count += r2.required_rolls_count;
-            r1.total_weight_kg = Number(((r1.total_weight_kg || 0) + (r2.total_weight_kg || 0)).toFixed(2));
-            r1.required_jumbo_width_mm = chosenWidth;
-            r1.expected_trim_mm = trim;
+          r1.required_rolls_count = (r1.required_rolls_count || 0) + (r2.required_rolls_count || 0);
+          r1.total_weight_kg = Number(((r1.total_weight_kg || 0) + (r2.total_weight_kg || 0)).toFixed(2));
+          r1.required_jumbo_width_mm = chosenWidth;
+          if (r2.expected_trim_mm != null) {
+            r1.expected_trim_mm = Math.min(r1.expected_trim_mm ?? r2.expected_trim_mm, r2.expected_trim_mm);
+          }
+          r1.ps01_parent_deckle_id = r1.ps01_parent_deckle_id || r2.ps01_parent_deckle_id || `ps01-merged-${r1.id}`;
+          r1.ps01_run_index = Math.min(Number(r1.ps01_run_index || 9999), Number(r2.ps01_run_index || 9999));
 
             for (const o2 of r2.orders_covered) {
+
               const existing = r1.orders_covered.find(o1 => o1.order_id === o2.order_id);
               if (existing) {
                 existing.required_reels += o2.required_reels;
@@ -2143,7 +2372,6 @@ function consolidateRequirements(requirements: JumboRequirement[]): JumboRequire
             }
 
             mergedIds.add(r2.id);
-          }
         }
       }
     }
@@ -2194,7 +2422,10 @@ function consolidateRequirements(requirements: JumboRequirement[]): JumboRequire
   // Heavy post-passes default OFF for synthesize latency; enable explicitly for campaign mode
   const shouldOptimize = options?.enableCampaignOptimization ?? true;
   if (!shouldOptimize) {
-    return baseConsolidated;
+    return baseConsolidated.filter(r => {
+      const trim = r.ps01_feasibility?.ps01_trim_mm;
+      return typeof trim !== 'number' || (trim >= 150 && trim <= 500);
+    });
   }
 
   // Phase 5: Campaign Optimizer Segmentation & Continuation Pass
@@ -2215,7 +2446,10 @@ function consolidateRequirements(requirements: JumboRequirement[]): JumboRequire
     : segmented;
 
   // Phase 6/7: Final Setup Consolidation
-  return consolidateRequirements(clustered);
+  return consolidateRequirements(clustered).filter(r => {
+    const trim = r.ps01_feasibility?.ps01_trim_mm;
+    return typeof trim !== 'number' || (trim >= 150 && trim <= 500);
+  });
 }
 
 /**
@@ -2712,9 +2946,16 @@ export function applyMasterWidthClustering(
       resolvedCutCombo = Array(ups).fill(canonicalW);
     }
     const resolvedTotalWeb = resolvedCutCombo && resolvedCutCombo.length > 0 ? resolvedCutCombo.reduce((a, b) => a + b, 0) : clusterResult.ps01_feasibility.ps01_deckle_mm;
-    const resolvedTrim = 10400 - resolvedTotalWeb;
+    const resolvedDeckle = clusterResult.ps01_feasibility.ps01_deckle_mm || 10400;
+    const resolvedTrim = resolvedDeckle - resolvedTotalWeb;
     const resolvedUps = resolvedCutCombo ? resolvedCutCombo.length : clusterResult.ps01_feasibility.ps01_ups;
-    const deckleEff = Number((((10400 - resolvedTrim) / 10400) * 100).toFixed(2));
+    const deckleEff = Number((((resolvedDeckle - resolvedTrim) / resolvedDeckle) * 100).toFixed(2));
+
+    // HARD RULE: PS01 edge trim must be >= 150 mm (RED below 150 is forbidden)
+    if (resolvedTrim < 150 || resolvedTrim > 500) {
+      return r; // keep original requirement; do not apply illegal clustered width
+    }
+    const ps01Status: 'GREEN' | 'YELLOW' = (resolvedTrim >= 150 && resolvedTrim <= 280) ? 'GREEN' : 'YELLOW';
 
     return {
       ...r,
@@ -2729,9 +2970,9 @@ export function applyMasterWidthClustering(
       efficiency_percent: efficiency,
       ps01_cut_combination: resolvedCutCombo,
       ps01_feasibility: {
-        status: clusterResult.ps01_feasibility.status,
-        is_feasible: clusterResult.ps01_feasibility.is_valid,
-        ps01_deckle_mm: clusterResult.ps01_feasibility.ps01_deckle_mm,
+        status: ps01Status,
+        is_feasible: true,
+        ps01_deckle_mm: resolvedDeckle,
         jumbo_width_mm: canonicalW,
         ps01_ups: resolvedUps,
         ps01_cut_combination: resolvedCutCombo,
@@ -2741,7 +2982,7 @@ export function applyMasterWidthClustering(
         ps01_duplex_balanced: true,
         side_a_ups: Math.ceil(resolvedUps / 2),
         side_b_ups: Math.floor(resolvedUps / 2),
-        relaxation_type: 'NONE',
+        relaxation_type: ps01Status === 'GREEN' ? 'NONE' : 'PS01_TRIM_RELAXED',
         explanation: isPure ? `${resolvedUps}-UPS pure jumbo manufacturing pattern on PS01 ([${resolvedCutCombo.join(', ')}] mm)` : clusterResult.ps01_feasibility.explanation,
       },
     };
@@ -4303,8 +4544,9 @@ export function applyCampaignMasterWidthClustering(
               }
             }
             const totalWeb = updatedCombo.reduce((a, b) => a + b, 0);
-            const trim = 10400 - totalWeb;
-            const eff = Number(((totalWeb / 10400) * 100).toFixed(2));
+            const deckleForCombo = pool.find(r => r.ps01_parent_deckle_id === deckleId)?.ps01_feasibility?.ps01_deckle_mm || 10400;
+            const trim = deckleForCombo - totalWeb;
+            const eff = Number(((totalWeb / deckleForCombo) * 100).toFixed(2));
 
             // Lockstep update across ALL requirements in pool with this parent deckle
             for (let pIdx = 0; pIdx < pool.length; pIdx++) {
@@ -4340,7 +4582,9 @@ export function applyCampaignMasterWidthClustering(
                 ...up.ps01_feasibility,
                 ps01_cut_combination: currentDeckleCombo || up.ps01_feasibility.ps01_cut_combination,
                 ps01_total_width_mm: currentDeckleCombo ? currentDeckleCombo.reduce((a, b) => a + b, 0) : up.ps01_feasibility.ps01_total_width_mm,
-                ps01_trim_mm: currentDeckleCombo ? 10400 - currentDeckleCombo.reduce((a, b) => a + b, 0) : up.ps01_feasibility.ps01_trim_mm,
+                ps01_trim_mm: currentDeckleCombo
+                  ? (up.ps01_feasibility?.ps01_deckle_mm || 10400) - currentDeckleCombo.reduce((a, b) => a + b, 0)
+                  : up.ps01_feasibility.ps01_trim_mm,
               }
             };
             clusteredIds.add(orig.id);

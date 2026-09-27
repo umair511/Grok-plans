@@ -18,7 +18,8 @@ import {
   Sliders,
   TrendingUp,
   LayoutGrid,
-  ListOrdered
+  ListOrdered,
+  Database
 } from 'lucide-react';
 import { UserProfile, UserRole } from '../types';
 
@@ -74,6 +75,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
       icon: UploadCloud,
       badge: pendingOrdersCount,
     },
+    {
+      id: 'film-specs',
+      label: 'Film Specs Master DB',
+      icon: Database,
+    },
   ];
 
   // PRIMARY SLITTER (PS) MODULE NAVIGATION
@@ -112,7 +118,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
     },
     {
       id: 'rules',
-      label: 'Masters & Rules',
+      label: 'Machine Parameters',
       icon: Settings,
     },
     {

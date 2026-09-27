@@ -174,7 +174,7 @@ export const MetallizerDemand: React.FC<MetallizerDemandProps> = ({
                       <button
                         onClick={() => onTogglePriority(order.id)}
                         className={`cursor-pointer ${order.priority ? 'text-amber-500' : 'text-slate-300 hover:text-slate-400'}`}
-                        title="Toggle Priority"
+                        title="Priority: starred orders plan first (strict) — non-priority may wait or lose capacity"
                       >
                         <Star className={`w-4 h-4 ${order.priority ? 'fill-amber-500' : ''}`} />
                       </button>

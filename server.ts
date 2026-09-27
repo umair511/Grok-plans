@@ -17,7 +17,7 @@ import {
 
 async function startServer() {
   const app = express();
-  const PORT = 3003;
+  const PORT = 3002;
 
   app.use(express.json({ limit: "25mb" }));
 
@@ -307,7 +307,7 @@ async function startServer() {
   // Vite middleware setup (development vs production)
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
-      server: { middlewareMode: true, hmr: { port: 24681 } },
+      server: { middlewareMode: true, hmr: { port: 24680 } },
       appType: "spa",
     });
     app.use(vite.middlewares);

@@ -78,6 +78,7 @@ import { PlanningRunsList } from './components/PlanningRunsList';
 import { PlanDetailViewer } from './components/PlanDetailViewer';
 import { ReportsView } from './components/ReportsView';
 import { MastersRules } from './components/MastersRules';
+import { FilmSpecsManager } from './components/stuffing/FilmSpecsManager';
 import { AuditLogView } from './components/AuditLogView';
 import { TestSuiteModal } from './components/TestSuiteModal';
 
@@ -212,7 +213,7 @@ export default function App() {
   }, []);
 
   const handleResetDatabase = () => {
-    if (window.confirm('Are you sure you want to reset all data back to the original SAP VA05 factory seed backlog?')) {
+    if (window.confirm('Are you sure you want to reset all data back to the original factory seed order backlog?')) {
       resetDatabaseToSeed();
       loadData();
       logAuditEvent(currentUser, 'UPDATE', 'DATABASE', 'RESET', 'Database reset to factory seed dataset');
@@ -490,6 +491,7 @@ export default function App() {
               requirements={ssJumboRequirements}
               plans={ssPlans}
               settings={ssSettings}
+              onSettingsSaved={(newSettings) => setSsSettings(newSettings)}
               currentUser={currentUser}
               preselectedFilm={preselectedSsFilm}
               onRequirementsUpdated={(reqs) => setSsJumboRequirements(reqs)}
@@ -592,6 +594,7 @@ export default function App() {
               preselectedFilm={preselectedMslFilm}
               onRequirementsUpdated={(reqs) => setJumboRequirements(reqs)}
               onJumboRollsUpdated={(rolls) => setJumboRolls(rolls)}
+              onSettingsSaved={(newSettings) => setMetallizerSettings(newSettings)}
               onNavigateToStudio={() => {
                 setJumboRolls(getStoredJumboRolls());
                 setActiveTab('msl-generator');
@@ -613,6 +616,7 @@ export default function App() {
               jumboRolls={jumboRolls}
               plans={metallizerPlans}
               settings={metallizerSettings}
+              onSettingsSaved={(newSettings) => setMetallizerSettings(newSettings)}
               currentUser={currentUser}
               preselectedFilm={preselectedMslFilm}
               onRunCommitted={handleMslRunCommitted}
@@ -691,6 +695,10 @@ export default function App() {
             />
           )}
 
+          {activeTab === 'film-specs' && (
+            <FilmSpecsManager />
+          )}
+
           {activeTab === 'orders' && (
             <OrdersImport
               orders={orders}
@@ -715,6 +723,7 @@ export default function App() {
             <PlanGeneratorStudio
               orders={orders}
               rules={rules}
+              onRulesUpdated={(newRules) => setRules(newRules)}
               currentUser={currentUser}
               preselectedFilm={preselectedFilm}
               onRunCommitted={handleRunCommitted}
@@ -750,7 +759,6 @@ export default function App() {
               rules={rules}
               currentUser={currentUser}
               onRulesUpdated={(newRules) => setRules(newRules)}
-              onOpenTests={() => setIsTestModalOpen(true)}
             />
           )}
 

@@ -497,9 +497,8 @@ export function generatePS01PlanForJumboCombination(
         .map(([w, count]) => (count > 1 ? `${w}*${count}` : `${w}`))
         .join(' + ');
     };
-    const customerLabel = matchedReq 
-      ? `MSL ${matchedReq.ups}-UPS: ${formatWidthsMultiplier(matchedReq.finished_widths_covered || [])}`
-      : `${width}mm JUMBO`;
+    // Jumbo Rolls / PS01 manufacturing sheet only — not MSL slit sheets
+    const customerLabel = 'FOR METALLIZER';
 
     const uniqueIndex = uniqueWidths.indexOf(width);
     const sizeItemNumber = (uniqueIndex + 1) * 10;

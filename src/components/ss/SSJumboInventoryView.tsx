@@ -51,7 +51,7 @@ export const SSJumboInventoryView: React.FC<SSJumboInventoryViewProps> = ({
   // Single Roll Form State
   const [newRollId, setNewRollId] = useState(`JR-${DEFAULT_SS_FILM}-${Date.now().toString().slice(-4)}`);
   const [newFilm, setNewFilm] = useState(DEFAULT_SS_FILM);
-  const [newWidth, setNewWidth] = useState<number>(Math.min(1700, settings.max_jumbo_width_mm || 1720));
+  const [newWidth, setNewWidth] = useState<number>(Math.min(1730, settings.max_jumbo_width_mm || 1730));
   const [newLength, setNewLength] = useState<number>(39000);
   const [newThickness, setNewThickness] = useState<number>(SS_FILM_OPTIONS[0]?.thickness_micron || 20);
   const [newNotes, setNewNotes] = useState('');
@@ -59,7 +59,7 @@ export const SSJumboInventoryView: React.FC<SSJumboInventoryViewProps> = ({
   // Edit Roll Form State
   const [editRollId, setEditRollId] = useState('');
   const [editFilm, setEditFilm] = useState(DEFAULT_SS_FILM);
-  const [editWidth, setEditWidth] = useState<number>(Math.min(1700, settings.max_jumbo_width_mm || 1720));
+  const [editWidth, setEditWidth] = useState<number>(Math.min(1730, settings.max_jumbo_width_mm || 1730));
   const [editLength, setEditLength] = useState<number>(39000);
   const [editRemainingLength, setEditRemainingLength] = useState<number>(39000);
   const [editThickness, setEditThickness] = useState<number>(18);

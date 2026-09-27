@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   Sliders, 
   RotateCcw, 
@@ -21,13 +21,22 @@ export const MetallizerSettingsView: React.FC<MetallizerSettingsViewProps> = ({
   settings,
   onSettingsSaved,
 }) => {
-  const [formData, setFormData] = useState<MetallizerMachineSettings>(settings);
+  const [formData, setFormData] = useState<MetallizerMachineSettings>({ ...settings });
   const [saveSuccess, setSaveSuccess] = useState(false);
+
+  useEffect(() => {
+    setFormData({ ...settings });
+  }, [settings]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    saveStoredMetallizerSettings(formData);
-    onSettingsSaved(formData);
+    const toSave: MetallizerMachineSettings = {
+      ...formData,
+      updated_at: new Date().toISOString(),
+    };
+    saveStoredMetallizerSettings(toSave);
+    onSettingsSaved(toSave);
+    setFormData(toSave);
     setSaveSuccess(true);
     setTimeout(() => setSaveSuccess(false), 2500);
   };
@@ -104,7 +113,7 @@ export const MetallizerSettingsView: React.FC<MetallizerSettingsViewProps> = ({
                 type="number"
                 value={formData.max_jumbo_width_mm}
                 onChange={(e) => setFormData({ ...formData, max_jumbo_width_mm: Number(e.target.value) })}
-                className="w-full px-3 py-1.5 bg-slate-50 border border-slate-300 rounded-lg font-mono font-bold text-slate-900"
+                className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg font-mono font-bold text-slate-900 focus:ring-2 focus:ring-purple-300/50"
               />
               <span className="text-[10px] text-slate-400">Default: 3650 mm (Section 9.2)</span>
             </div>
@@ -115,7 +124,7 @@ export const MetallizerSettingsView: React.FC<MetallizerSettingsViewProps> = ({
                 type="number"
                 value={formData.max_jumbo_diameter_mm}
                 onChange={(e) => setFormData({ ...formData, max_jumbo_diameter_mm: Number(e.target.value) })}
-                className="w-full px-3 py-1.5 bg-slate-50 border border-slate-300 rounded-lg font-mono font-bold text-purple-900"
+                className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg font-mono font-bold text-purple-900 focus:ring-2 focus:ring-purple-300/50"
               />
               <span className="text-[10px] text-slate-400">Hard limit: 1250 mm (Section 9.7)</span>
             </div>
@@ -136,13 +145,12 @@ export const MetallizerSettingsView: React.FC<MetallizerSettingsViewProps> = ({
             <div>
               <label className="block font-semibold text-slate-700 mb-1">Density (g/cm³)</label>
               <input
-                type="number"
-                step="0.001"
-                value={formData.density}
-                onChange={(e) => setFormData({ ...formData, density: Number(e.target.value) })}
-                className="w-full px-3 py-1.5 bg-slate-50 border border-slate-300 rounded-lg font-mono font-bold text-slate-900"
+                type="text"
+                disabled
+                value="Film Specs Master DB"
+                className="w-full px-3 py-1.5 bg-slate-100 border border-slate-200 rounded-lg font-semibold text-slate-600"
               />
-              <span className="text-[10px] text-slate-400">Standard BOPP density: 0.91</span>
+              <span className="text-[10px] text-slate-400">Not manual — density is loaded from Film Specs Master DB per film at plan time</span>
             </div>
 
             <div>
@@ -152,7 +160,7 @@ export const MetallizerSettingsView: React.FC<MetallizerSettingsViewProps> = ({
                 step="0.01"
                 value={formData.diameter_constant}
                 onChange={(e) => setFormData({ ...formData, diameter_constant: Number(e.target.value) })}
-                className="w-full px-3 py-1.5 bg-slate-50 border border-slate-300 rounded-lg font-mono font-bold text-slate-900"
+                className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg font-mono font-bold text-slate-900 focus:ring-2 focus:ring-purple-300/50"
               />
               <span className="text-[10px] text-slate-400">Formula: D = k × √(T × L)</span>
             </div>
@@ -167,6 +175,17 @@ export const MetallizerSettingsView: React.FC<MetallizerSettingsViewProps> = ({
 
           <div className="grid grid-cols-1 sm:grid-cols-4 gap-4 text-xs">
             <div>
+              <label className="block font-semibold text-slate-700 mb-1">PS01 Mother Deckle (mm)</label>
+              <input
+                type="number"
+                min={1000}
+                max={20000}
+                step={1}
+                value={formData.ps01_deckle_width_mm ?? 10400}
+                onChange={(e) => setFormData({ ...formData, ps01_deckle_width_mm: Number(e.target.value) || 10400 })}
+                className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg font-mono font-bold text-slate-900 mb-3 focus:ring-2 focus:ring-purple-300/50"
+              />
+              <span className="text-[10px] text-slate-400 block mb-3">Custom deckle (mm). Engine uses this saved value.</span>
               <label className="block font-semibold text-slate-700 mb-1">Preferred UPS</label>
               <input
                 type="number"
@@ -174,9 +193,25 @@ export const MetallizerSettingsView: React.FC<MetallizerSettingsViewProps> = ({
                 max={4}
                 value={formData.preferred_ups}
                 onChange={(e) => setFormData({ ...formData, preferred_ups: Number(e.target.value) })}
-                className="w-full px-3 py-1.5 bg-slate-50 border border-slate-300 rounded-lg font-mono font-bold text-slate-900"
+                className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg font-mono font-bold text-slate-900 focus:ring-2 focus:ring-purple-300/50"
               />
               <span className="text-[10px] text-slate-400">Primary target: 3 UPS</span>
+            </div>
+
+            <div>
+              <label className="block font-semibold text-slate-700 mb-1">Allow 4 UPS</label>
+              <button
+                type="button"
+                onClick={() => setFormData({ ...formData, allow_4_ups: !formData.allow_4_ups })}
+                className={`w-full px-3 py-1.5 rounded-lg font-bold text-xs border transition-colors ${
+                  formData.allow_4_ups
+                    ? 'bg-amber-50 border-amber-400 text-amber-800'
+                    : 'bg-slate-50 border-slate-300 text-slate-600'
+                }`}
+              >
+                {formData.allow_4_ups ? 'ON — 4-UPS fallback enabled' : 'OFF — 3-UPS only (default)'}
+              </button>
+              <span className="text-[10px] text-slate-400">Default off: all MSL demand on 3-UPS mothers</span>
             </div>
 
             <div>
@@ -187,7 +222,7 @@ export const MetallizerSettingsView: React.FC<MetallizerSettingsViewProps> = ({
                 max={6}
                 value={formData.max_planning_ups}
                 onChange={(e) => setFormData({ ...formData, max_planning_ups: Number(e.target.value) })}
-                className="w-full px-3 py-1.5 bg-slate-50 border border-slate-300 rounded-lg font-mono font-bold text-slate-900"
+                className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg font-mono font-bold text-slate-900 focus:ring-2 focus:ring-purple-300/50"
               />
               <span className="text-[10px] text-slate-400">Total 6 UPS (Arms 1-3 Side A, Arms 4-6 Side B)</span>
             </div>
@@ -198,7 +233,7 @@ export const MetallizerSettingsView: React.FC<MetallizerSettingsViewProps> = ({
                 type="number"
                 value={formData.min_trim_mm}
                 onChange={(e) => setFormData({ ...formData, min_trim_mm: Number(e.target.value) })}
-                className="w-full px-3 py-1.5 bg-slate-50 border border-slate-300 rounded-lg font-mono font-bold text-slate-900"
+                className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg font-mono font-bold text-slate-900 focus:ring-2 focus:ring-purple-300/50"
               />
               <span className="text-[10px] text-slate-400">SRS target min: 20 mm</span>
             </div>
@@ -209,7 +244,7 @@ export const MetallizerSettingsView: React.FC<MetallizerSettingsViewProps> = ({
                 type="number"
                 value={formData.max_trim_mm}
                 onChange={(e) => setFormData({ ...formData, max_trim_mm: Number(e.target.value) })}
-                className="w-full px-3 py-1.5 bg-slate-50 border border-slate-300 rounded-lg font-mono font-bold text-slate-900"
+                className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg font-mono font-bold text-slate-900 focus:ring-2 focus:ring-purple-300/50"
               />
               <span className="text-[10px] text-slate-400">SRS target max: 30 mm</span>
             </div>
@@ -222,7 +257,7 @@ export const MetallizerSettingsView: React.FC<MetallizerSettingsViewProps> = ({
                 type="number"
                 value={formData.min_slit_width_mm}
                 onChange={(e) => setFormData({ ...formData, min_slit_width_mm: Number(e.target.value) })}
-                className="w-full px-3 py-1.5 bg-slate-50 border border-slate-300 rounded-lg font-mono font-bold text-slate-900"
+                className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg font-mono font-bold text-slate-900 focus:ring-2 focus:ring-purple-300/50"
               />
               <span className="text-[10px] text-slate-400">Default: 300 mm</span>
             </div>
@@ -233,7 +268,7 @@ export const MetallizerSettingsView: React.FC<MetallizerSettingsViewProps> = ({
                 type="number"
                 value={formData.max_slit_width_mm}
                 onChange={(e) => setFormData({ ...formData, max_slit_width_mm: Number(e.target.value) })}
-                className="w-full px-3 py-1.5 bg-slate-50 border border-slate-300 rounded-lg font-mono font-bold text-slate-900"
+                className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg font-mono font-bold text-slate-900 focus:ring-2 focus:ring-purple-300/50"
               />
               <span className="text-[10px] text-slate-400">Default: 2000 mm</span>
             </div>
@@ -244,7 +279,7 @@ export const MetallizerSettingsView: React.FC<MetallizerSettingsViewProps> = ({
                 type="number"
                 value={formData.hard_max_trim_mm}
                 onChange={(e) => setFormData({ ...formData, hard_max_trim_mm: Number(e.target.value) })}
-                className="w-full px-3 py-1.5 bg-slate-50 border border-slate-300 rounded-lg font-mono font-bold text-slate-900"
+                className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg font-mono font-bold text-slate-900 focus:ring-2 focus:ring-purple-300/50"
               />
               <span className="text-[10px] text-slate-400">Default: 50 mm</span>
             </div>

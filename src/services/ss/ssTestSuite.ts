@@ -59,7 +59,7 @@ export function runAllSSTests(): SSTestResult[] {
     settings.physical_ups === 14 &&
     settings.preferred_ups === 6 &&
     settings.max_planning_ups === 14 &&
-    settings.max_jumbo_width_mm === 1720 &&
+    settings.max_jumbo_width_mm === 1730 &&
     settings.max_jumbo_diameter_mm === 1000 &&
     settings.min_trim_mm === 11 &&
     settings.max_trim_mm === 35 &&
@@ -69,27 +69,27 @@ export function runAllSSTests(): SSTestResult[] {
     id: 'MSL-01',
     code: 'MSL-01',
     title: 'MSL-01: Machine Configuration',
-    description: 'Verify default Secondary Slitter parameters (14 physical UPS, 6 preferred, 14 max planning UPS, 1720mm width, 1000mm diameter, GREEN 11-35mm trim, 6" paper core)',
+    description: 'Verify default Secondary Slitter parameters (14 physical UPS, 6 preferred, 14 max planning UPS, 1730mm width, 1000mm diameter, GREEN 11-35mm trim, 6" paper core)',
     status: msl01Pass ? 'PASS' : 'FAIL',
-    expected: 'Width <= 1720mm, Dia <= 1000mm, Trim GREEN 11-35mm / YELLOW 36-45mm, 14 UPS, 6" paper core',
+    expected: 'Width <= 1730mm, Dia <= 1000mm, Trim GREEN 11-35mm / YELLOW 36-45mm, 14 UPS, 6" paper core',
     actual: `Width: ${settings.max_jumbo_width_mm}mm, Dia: ${settings.max_jumbo_diameter_mm}mm, Trim: ${settings.min_trim_mm}-${settings.max_trim_mm}mm, Core: ${settings.core}`,
     execution_ms: 0.1,
   });
 
   // =========================================================================
-  // MSL-02: 1720 mm Maximum Jumbo Width Limit
+  // MSL-02: 1730 mm Maximum Jumbo Width Limit
   // =========================================================================
   const isWidthValid = (w: number) => w <= settings.max_jumbo_width_mm;
-  const msl02Pass = isWidthValid(1720) && isWidthValid(1600) && isWidthValid(1450) && !isWidthValid(1721) && !isWidthValid(2000);
+  const msl02Pass = isWidthValid(1730) && isWidthValid(1720) && isWidthValid(1600) && !isWidthValid(1731) && !isWidthValid(2000);
 
   results.push({
     id: 'MSL-02',
     code: 'MSL-02',
-    title: 'MSL-02: 1720 mm Maximum Jumbo Width',
-    description: 'Verify hard constraint: jumbo width <= 1720 mm is strictly enforced and wider rolls are rejected',
+    title: 'MSL-02: 1730 mm Maximum Jumbo Width',
+    description: 'Verify hard constraint: jumbo width <= 1730 mm is strictly enforced and wider rolls are rejected',
     status: msl02Pass ? 'PASS' : 'FAIL',
-    expected: '1720mm accepted, 1721mm rejected',
-    actual: `1720mm: ${isWidthValid(1720) ? 'VALID' : 'INVALID'}, 1721mm: ${isWidthValid(1721) ? 'VALID' : 'REJECTED'}`,
+    expected: '1730mm accepted, 1731mm rejected',
+    actual: `1730mm: ${isWidthValid(1730) ? 'VALID' : 'INVALID'}, 1731mm: ${isWidthValid(1731) ? 'VALID' : 'REJECTED'}`,
     execution_ms: 0.1,
   });
 
@@ -1622,7 +1622,7 @@ export function runAllSSTests(): SSTestResult[] {
   });
 
   // =========================================================================
-  // MSL-60: Acceptance Test 3 - SS Jumbo Width Boundaries (355–1720 mm)
+  // MSL-60: Acceptance Test 3 - SS Jumbo Width Boundaries (355–1730 mm)
   // =========================================================================
   const evalMinBound = evaluatePS01CombinationFeasibility(Array(16).fill(640), 'PLAIN_TRANSPARENT', 18);
   const evalBelowMin = evaluatePS01CombinationFeasibility(Array(16).fill(350), 'PLAIN_TRANSPARENT', 18);
@@ -1631,10 +1631,10 @@ export function runAllSSTests(): SSTestResult[] {
   results.push({
     id: 'MSL-60',
     code: 'MSL-60',
-    title: 'MSL-60: Acceptance Test 3 - SS Jumbo Width Range Enforcement (355–1720 mm)',
-    description: 'Verify SS jumbo width limits 355–1720 mm are strictly enforced in PS01 feasibility evaluation',
+    title: 'MSL-60: Acceptance Test 3 - SS Jumbo Width Range Enforcement (355–1730 mm)',
+    description: 'Verify SS jumbo width limits 355–1730 mm are strictly enforced in PS01 feasibility evaluation',
     status: msl60Pass ? 'PASS' : 'FAIL',
-    expected: 'Jumbo widths within 355–1720mm accepted, < 355mm or > 1720mm rejected',
+    expected: 'Jumbo widths within 355–1730mm accepted, < 355mm or > 1730mm rejected',
     actual: `640mm: ${evalMinBound.is_feasible ? 'VALID' : 'INVALID'}, 350mm: ${evalBelowMin.is_feasible ? 'VALID' : 'REJECTED'}, 1750mm: ${evalAboveMax.is_feasible ? 'VALID' : 'REJECTED'}`,
     execution_ms: 0.2,
   });

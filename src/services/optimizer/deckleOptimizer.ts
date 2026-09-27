@@ -24,6 +24,7 @@ import {
 } from '../../types';
 import { calculateSingleReelWeight, calculateTrimWeight, calculateMillRollWeight } from '../weightCalculator';
 import { DEFAULT_PLANNING_RULES, FILM_MASTERS } from '../masterData';
+import { resolveFilmDensity, findFilmsMissingDensity } from '../stuffing/filmDensities';
 
 /**
  * Centralized Customer Over-Allocation Tolerance Factor
@@ -89,6 +90,30 @@ export interface OptimizationInput {
   custom_min_trim_mm?: number;
   custom_max_trim_mm?: number;
   trim_override_reason?: string;
+  /**
+   * SS module path: run the same PS engine against fixed 1705 mm jumbo
+   * for TNBPL10 / MATTPL12 (GREEN trim 11–35, YELLOW 36–45).
+   * When true, isPS01Order exclusion of SS-routed films is bypassed and
+   * min individual slit width drops to rules.min_slit_width_mm (default 50).
+   */
+  ss_fixed_deckle_mode?: boolean;
+}
+
+/** Active for the duration of one SS fixed-1705 PS-engine run (not exported). */
+let _ssFixedDeckleMode = false;
+
+function orderPassesPsEngineGate(order: VA05Order | undefined | null): boolean {
+  if (!order) return false;
+  if (_ssFixedDeckleMode) {
+    const film = String(order.film || '').trim().toUpperCase();
+    if (film !== 'TNBPL10' && film !== 'MATTPL12') return false;
+    return Number(order.remaining_qty) > 0.01 || Number(order.balance_qty) > 0.01;
+  }
+  return isPS01Order(order);
+}
+
+function minIndividualSlitWidthMm(): number {
+  return _ssFixedDeckleMode ? 50 : 355;
 }
 
 export interface OptimizationStepLog {
@@ -580,7 +605,8 @@ export function generateValidWidthCombinations(
   minUps: number = 3,
   maxUps: number = 16,
   maxTotalPatterns: number = 3500,
-  minIndividualWidth: number = 355
+  minIndividualWidth: number = 355, // overridden by minIndividualSlitWidthMm() at call sites in SS mode
+  deckleWidth: number = 10400
 ): { widthCombo: number[]; totalWidth: number }[] {
   // Hard physical constraint: filter out any individual slit width < 355 mm
   const validWidthsDesc = distinctWidthsDesc.filter(w => w >= minIndividualWidth);
@@ -588,6 +614,7 @@ export function generateValidWidthCombinations(
 
   const maxWidth = validWidthsDesc[0];
   const minWidth = validWidthsDesc[validWidthsDesc.length - 1];
+  const nominalSlitTotal = deckleWidth - 186;
 
   // Bucket candidates by (UPS arm count, Trim bin) to guarantee diversity across knife setups and trim levels
   // Trim bins: 0 = Nominal (180–192mm trim), 1 = Standard tight (140–180mm), 2 = Standard loose (192–250mm)
@@ -595,7 +622,7 @@ export function generateValidWidthCombinations(
   const maxPerBucket = Math.max(45, Math.ceil(maxTotalPatterns / 28));
 
   function getBucketKey(ups: number, totalWidth: number): string {
-    const trim = 10400 - totalWidth;
+    const trim = deckleWidth - totalWidth;
     let trimBin = 1;
     if (trim >= 180 && trim <= 192) trimBin = 0;
     else if (trim > 192) trimBin = 2;
@@ -613,7 +640,7 @@ export function generateValidWidthCombinations(
         bucketMap.set(bucketKey, bucket);
       }
 
-      const trimDev = Math.abs(currentWidth - 10214);
+      const trimDev = Math.abs(currentWidth - nominalSlitTotal);
       const distinctCount = new Set(currentCombo).size;
       // Multi-objective score: lower trim deviation + bonus for width diversity
       const score = trimDev - distinctCount * 3;
@@ -662,8 +689,8 @@ export function generateValidWidthCombinations(
   return allPatterns
     .sort((a, b) => {
       if (a.score !== b.score) return a.score - b.score;
-      const devA = Math.abs(a.totalWidth - 10214);
-      const devB = Math.abs(b.totalWidth - 10214);
+      const devA = Math.abs(a.totalWidth - nominalSlitTotal);
+      const devB = Math.abs(b.totalWidth - nominalSlitTotal);
       if (devA !== devB) return devA - devB;
       return a.widthCombo.length - b.widthCombo.length;
     })
@@ -686,11 +713,28 @@ export function findInitialSameLengthDeckles(
   targetLength: number,
   maxCandidatePool: number = 3500
 ): DecklePatternItem[][] {
-  const lengthOrders = eligibleOrders
-    .filter(o => o.remaining_qty > 0.01 && o.length_m === targetLength && isPS01Order(o))
+  let lengthOrders = eligibleOrders
+    .filter(o => o.remaining_qty > 0.01 && o.length_m === targetLength && orderPassesPsEngineGate(o))
     .sort((a, b) => b.width_mm - a.width_mm);
 
   if (lengthOrders.length === 0) return [];
+
+  // SS fixed-1705: limit combinatorial explosion (many narrow widths × 198 lines)
+  let poolLimit = maxCandidatePool;
+  if (_ssFixedDeckleMode) {
+    poolLimit = Math.min(maxCandidatePool, 400);
+    // Keep top 20 widths by remaining kg so search finishes in seconds not minutes
+    const kgByWidth = new Map<number, number>();
+    for (const o of lengthOrders) {
+      kgByWidth.set(o.width_mm, (kgByWidth.get(o.width_mm) || 0) + Number(o.remaining_qty || 0));
+    }
+    const topWidths = Array.from(kgByWidth.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 20)
+      .map(([w]) => w);
+    const topSet = new Set(topWidths);
+    lengthOrders = lengthOrders.filter(o => topSet.has(o.width_mm));
+  }
 
   const distinctWidths = Array.from(new Set(lengthOrders.map(o => o.width_mm))).sort((a, b) => b - a);
   const minSlitWidth = deckleWidth - maxTrim; // e.g. 10400 - 250 = 10150 mm
@@ -702,7 +746,9 @@ export function findInitialSameLengthDeckles(
     maxSlitWidth,
     minUps,
     maxUps,
-    maxCandidatePool
+    poolLimit,
+    minIndividualSlitWidthMm(),
+    deckleWidth
   );
 
   const concreteCombinations: DecklePatternItem[][] = [];
@@ -732,7 +778,7 @@ export function findInitialSameLengthDeckles(
       let assignedUps = 0;
       for (const ord of matchingOrders) {
         if (assignedUps >= neededUps) break;
-        const upsToAssign = Math.min(neededUps - assignedUps, Math.max(1, Math.floor((ord.remaining_qty) / (calculateSingleReelWeight(w, ord.thickness_micron || 20, ord.density || 0.91, ord.length_m) || 1)) || 1));
+        const upsToAssign = Math.min(neededUps - assignedUps, Math.max(1, Math.floor((ord.remaining_qty) / (calculateSingleReelWeight(w, ord.thickness_micron || 20, ord.density || resolveFilmDensity(ord.film) || 0, ord.length_m) || 1)) || 1));
         const actualUps = Math.min(neededUps - assignedUps, upsToAssign);
         
         const positions: number[] = [];
@@ -831,8 +877,8 @@ export function findInitialSameLengthDeckles(
         .filter(o => o.width_mm === w)
         .sort((a, b) => {
           if (a.priority !== b.priority) return (b.priority ? 1 : 0) - (a.priority ? 1 : 0);
-          const reelW_a = calculateSingleReelWeight(w, a.thickness_micron || 20, a.density || 0.91, a.length_m) || 1;
-          const reelW_b = calculateSingleReelWeight(w, b.thickness_micron || 20, b.density || 0.91, b.length_m) || 1;
+          const reelW_a = calculateSingleReelWeight(w, a.thickness_micron || 20, a.density || resolveFilmDensity(a.film) || 0, a.length_m) || 1;
+          const reelW_b = calculateSingleReelWeight(w, b.thickness_micron || 20, b.density || resolveFilmDensity(b.film) || 0, b.length_m) || 1;
           const remReels_a = a.remaining_qty / reelW_a;
           const remReels_b = b.remaining_qty / reelW_b;
           const frac_a = Math.abs(remReels_a - Math.round(remReels_a));
@@ -849,7 +895,7 @@ export function findInitialSameLengthDeckles(
       let assignedUps = 0;
       for (const ord of matchingOrders) {
         if (assignedUps >= neededUps) break;
-        const reelW = calculateSingleReelWeight(w, ord.thickness_micron || 20, ord.density || 0.91, ord.length_m) || 1;
+        const reelW = calculateSingleReelWeight(w, ord.thickness_micron || 20, ord.density || resolveFilmDensity(ord.film) || 0, ord.length_m) || 1;
         const upsToAssign = Math.min(neededUps - assignedUps, Math.max(1, Math.floor(ord.remaining_qty / reelW) || 1));
         const actualUps = Math.min(neededUps - assignedUps, upsToAssign);
         const positions: number[] = [];
@@ -935,10 +981,10 @@ export function findDuplexDualLengthDeckles(
   if (!isSynchronized) return [];
 
   const ordersA = eligibleOrders
-    .filter(o => o.remaining_qty > 0.01 && o.length_m === lengthA && isPS01Order(o))
+    .filter(o => o.remaining_qty > 0.01 && o.length_m === lengthA && orderPassesPsEngineGate(o))
     .sort((a, b) => b.width_mm - a.width_mm);
   const ordersB = eligibleOrders
-    .filter(o => o.remaining_qty > 0.01 && o.length_m === lengthB && isPS01Order(o))
+    .filter(o => o.remaining_qty > 0.01 && o.length_m === lengthB && orderPassesPsEngineGate(o))
     .sort((a, b) => b.width_mm - a.width_mm);
 
   if (ordersA.length === 0 || ordersB.length === 0) return [];
@@ -1070,7 +1116,7 @@ export function findDuplexDualCoreDeckles(
   deckleWidth: number,
   targetLength?: number
 ): DecklePatternItem[][] {
-  const activeOrders = eligibleOrders.filter(o => o.remaining_qty > 0.01 && isPS01Order(o) && (!targetLength || o.length_m === targetLength));
+  const activeOrders = eligibleOrders.filter(o => o.remaining_qty > 0.01 && orderPassesPsEngineGate(o) && (!targetLength || o.length_m === targetLength));
   const ordersCore3 = activeOrders.filter(o => o.core === 3).sort((a, b) => b.width_mm - a.width_mm);
   const ordersCore6 = activeOrders.filter(o => o.core === 6).sort((a, b) => b.width_mm - a.width_mm);
 
@@ -1202,7 +1248,7 @@ export function findInitialMixedLengthDeckles(
   deckleWidth: number
 ): DecklePatternItem[][] {
   const activeOrders = eligibleOrders
-    .filter(o => o.remaining_qty > 0.01 && isPS01Order(o))
+    .filter(o => o.remaining_qty > 0.01 && orderPassesPsEngineGate(o))
     .sort((a, b) => b.width_mm - a.width_mm);
 
   if (activeOrders.length === 0) return [];
@@ -1430,7 +1476,7 @@ export function simulateMultiPackExecution(
 
     for (const o of simOrderMap.values()) {
       if (o.remaining_qty <= 0.05) continue;
-      if (o.width_mm < 355) continue; // Hard physical constraint: minimum allowable slit width 355 mm
+      if (o.width_mm < minIndividualSlitWidthMm()) continue; // PS: 355 mm · SS fixed-1705: 50 mm
       if (duplexAssign.isDualLength && o.length_m !== oldArm.length_m) continue;
       if (!duplexAssign.isDualLength && o.length_m !== targetLength) continue;
       if (duplexAssign.isDualCore && o.core !== oldArm.core) continue;
@@ -2098,24 +2144,45 @@ export function simulateMultiPackExecution(
       h => parentAssignedPositions.includes(h.position) && h.orderId !== parent.orderId
     );
 
+    // Process replacements in pack order. FUTURE SHIFT only when width changes
+    // vs the last active width on this arm (parent first, then each new size once).
+    // Same size after a change (different customer/SO/item) → no FUTURE SHIFT, UPS "-".
     const replacementOrderIds = Array.from(new Set(replacementHistory.map(h => h.orderId)));
-    replacementOrderIds.forEach(repId => {
-      const repOrderRef = availableOrders.find(o => o.id === repId) || simOrderMap.get(repId)!;
-      const repEntries = replacementHistory.filter(h => h.orderId === repId);
+    const repGroups = replacementOrderIds
+      .map(repId => {
+        const repOrderRef = availableOrders.find(o => o.id === repId) || simOrderMap.get(repId)!;
+        const repEntries = replacementHistory.filter(h => h.orderId === repId);
+        const repStartPack = Math.min(...repEntries.map(h => h.pack));
+        return { repId, repOrderRef, repEntries, repStartPack };
+      })
+      .filter(g => g.repOrderRef && g.repEntries.length > 0)
+      .sort((a, b) => a.repStartPack - b.repStartPack || a.repId.localeCompare(b.repId));
+
+    let lastActiveWidthMm = Number(parentOrderRef.width_mm || 0);
+
+    for (const g of repGroups) {
+      const { repId, repOrderRef, repEntries, repStartPack } = g;
       const repPositions = Array.from(new Set(repEntries.map(h => h.position))).sort((a, b) => a - b);
-      const repStartPack = Math.min(...repEntries.map(h => h.pack));
       const repEndPack = Math.max(...repEntries.map(h => h.pack));
       const repActivePacks = repEndPack - repStartPack + 1;
       const repTotalWeight = repEntries.reduce((sum, h) => sum + h.weightKg, 0);
       const repReels = repEntries.length;
+      const repWidth = Number(repOrderRef.width_mm || 0);
 
       const matchChange = finalChanges.find(
-        c => repPositions.includes(c.position) && (c.new_order_ref.includes(repOrderRef.sales_order) || c.new_width_mm === repOrderRef.width_mm)
+        c =>
+          repPositions.includes(c.position) &&
+          (c.new_order_ref.includes(repOrderRef.sales_order) || c.new_width_mm === repOrderRef.width_mm)
       );
+      const instruction = matchChange ? matchChange.instruction : undefined;
 
-      const instruction = matchChange
-        ? matchChange.instruction
-        : undefined;
+      // Only the first order that introduces a NEW size vs last active width is FUTURE SHIFT
+      const isSizeChange = repWidth > 0 && lastActiveWidthMm > 0 && repWidth !== lastActiveWidthMm;
+      if (isSizeChange) {
+        lastActiveWidthMm = repWidth;
+      } else if (lastActiveWidthMm <= 0 && repWidth > 0) {
+        lastActiveWidthMm = repWidth;
+      }
 
       consolidatedPlanItems.push({
         id: `item-order-${repId}-rep-${parent.orderId}`,
@@ -2134,7 +2201,7 @@ export function simulateMultiPackExecution(
         core: repOrderRef.core,
         treatment_side: repOrderRef.treatment_side,
         reels: repReels,
-        ups: repPositions.length,
+        ups: 0,
         initial_ups: 0,
         active_packs: repActivePacks,
         start_pack: repStartPack,
@@ -2142,10 +2209,10 @@ export function simulateMultiPackExecution(
         weight_per_pack_kg: 0,
         total_weight_kg: repTotalWeight,
         is_closed: (finalSnapshot.ordersState.get(repId)?.remaining_qty || 0) <= 0.05,
-        is_future_replacement: true,
-        replacement_instruction: instruction,
+        is_future_replacement: isSizeChange,
+        replacement_instruction: isSizeChange ? instruction : undefined,
       });
-    });
+    }
   });
 
   const planSegments: PlanSegment[] = [
@@ -2449,6 +2516,9 @@ function executeSingleTreatmentGroupOptimization(
   startingPlanIndex = 1,
   runNumberOverride?: string
 ): OptimizationResult {
+  const prevSsMode = _ssFixedDeckleMode;
+  _ssFixedDeckleMode = !!input.ss_fixed_deckle_mode;
+
   const rules = input.rules || DEFAULT_PLANNING_RULES;
   const logs: OptimizationStepLog[] = [];
   let logStep = 1;
@@ -2461,7 +2531,16 @@ function executeSingleTreatmentGroupOptimization(
   let activeMinTrim = rules.min_trim_mm || 150;
   let activeMaxTrim = rules.max_trim_mm || 280;
 
-  if (trimRuleMode === 'RELAXED_50MM') {
+  if (_ssFixedDeckleMode) {
+    // SS fixed-1705: GREEN 11–35; YELLOW/relaxed via MANUAL_OVERRIDE or RELAXED → 11–45
+    if (trimRuleMode === 'MANUAL_OVERRIDE' || trimRuleMode === 'RELAXED_50MM') {
+      activeMinTrim = input.custom_min_trim_mm !== undefined ? input.custom_min_trim_mm : 11;
+      activeMaxTrim = input.custom_max_trim_mm !== undefined ? input.custom_max_trim_mm : 45;
+    } else {
+      activeMinTrim = rules.min_trim_mm || 11;
+      activeMaxTrim = rules.max_trim_mm || 35;
+    }
+  } else if (trimRuleMode === 'RELAXED_50MM') {
     activeMinTrim = 150;
     activeMaxTrim = 500;
   } else if (trimRuleMode === 'MANUAL_OVERRIDE') {
@@ -2485,12 +2564,25 @@ function executeSingleTreatmentGroupOptimization(
   const filmMasters = activeFilms.map(f => FILM_MASTERS.find(m => m.code === f));
   const thicknesses = activeFilms.map((f, i) => input.orders.find(o => o.film === f)?.thickness_micron || filmMasters[i]?.thickness_micron || 20);
   const filmThickness = thicknesses[0];
-  const orderWithDensity = input.orders.find(o => activeFilms.includes(o.film) && o.density && !isNaN(o.density));
-  const filmDensity = orderWithDensity?.density || filmMasters[0]?.density || 0.91;
+  // Density: Film Specs Master DB first, then order field — never silent 0.91
+  const missingDensityFilms = findFilmsMissingDensity(activeFilms);
+  if (missingDensityFilms.length > 0) {
+    throw new Error(
+      `Density not saved in Film Specs Master Database for: ${missingDensityFilms.join(', ')}. ` +
+      `Open Master Backlog → Film Specs Master DB and add density for each film before planning.`
+    );
+  }
+  const filmDensity =
+    resolveFilmDensity(activeFilms[0]) ||
+    input.orders.find(o => activeFilms.includes(o.film) && o.density && o.density > 0)?.density ||
+    0;
+  if (!(filmDensity > 0)) {
+    throw new Error(`Density not saved for film(s): ${activeFilms.join(', ')}. Add in Film Specs Master DB.`);
+  }
 
   const currentOrders: VA05Order[] = input.orders
     .filter(o => {
-      if (!activeFilms.includes(o.film) || o.width_mm < 355) return false;
+      if (!activeFilms.includes(o.film) || o.width_mm < minIndividualSlitWidthMm()) return false;
       // Physical integrity check: An order cannot be planned on PS01 if 1 full physical reel exceeds its allowed +10% ceiling
       const singleReelKg = calculateSingleReelWeight(o.width_mm, filmThickness, filmDensity, o.length_m);
       const activeDemand = Math.max(Number(o.remaining_qty || 0), Number(o.balance_qty || 0));
@@ -2522,7 +2614,7 @@ function executeSingleTreatmentGroupOptimization(
   let stopReason = 'Planning completed: target output or eligible order closure achieved.';
   let suggestRelaxation = false;
 
-  const MAX_PLANS_PER_RUN = 25;
+  const MAX_PLANS_PER_RUN = _ssFixedDeckleMode ? 12 : 25;
 
   while (cumulativePlannedKg < targetKg && generatedPlans.length < MAX_PLANS_PER_RUN) {
     if (cumulativePlannedKg >= targetKg && cumulativePlannedKg <= targetMaxKg) {
@@ -3071,7 +3163,7 @@ function executeSingleTreatmentGroupOptimization(
 
   addLog(`Optimization session finished with status [${status}]. Total Plans: ${generatedPlans.length} · Output: ${cumulativePlannedKg.toLocaleString()} kg (${targetDeviationPercent >= 0 ? '+' : ''}${targetDeviationPercent}% of target) · Closed: ${closedCount} Orders.`);
 
-  return {
+  const result: OptimizationResult = {
     run: planningRun,
     plans: generatedPlans,
     remaining_orders: currentOrders,
@@ -3080,6 +3172,52 @@ function executeSingleTreatmentGroupOptimization(
     stop_reason: stopReason,
     suggest_trim_relaxation: suggestRelaxation,
   };
+  _ssFixedDeckleMode = prevSsMode;
+  return result;
+}
+
+/**
+ * SS Module entry: run the Primary Slitter (PS) engine on a fixed 1705 mm jumbo
+ * for TNBPL10 / MATTPL12 only.
+ * - Deckle (max): 1705 mm
+ * - GREEN trim: 11–35 mm
+ * - YELLOW / relaxed: 36–45 mm (pass trim_rule_mode MANUAL_OVERRIDE or RELAXED_50MM)
+ * All other PS engine logic (pack simulation, size-change, 1.10 ceiling, duplex) unchanged.
+ */
+export function generateSsFixedDecklePlans(input: OptimizationInput): OptimizationResult {
+  const film = String(input.film || '').trim().toUpperCase();
+  if (film !== 'TNBPL10' && film !== 'MATTPL12') {
+    throw new Error(
+      `SS Fixed-1705 PS Engine only supports TNBPL10 and MATTPL12 (got: ${input.film}).`
+    );
+  }
+
+  const ssRules: PlanningRules = {
+    ...(input.rules || DEFAULT_PLANNING_RULES),
+    id: 'ss-fixed-1705-ps-engine',
+    version: '1.0-ss',
+    deckle_width_mm: 1705,
+    min_trim_mm: 11,
+    max_trim_mm: 35,
+    min_slit_width_mm: 50,
+    min_ups: 1,
+    // 1705 mm practical max ~6–7 UPS for typical SS widths; keep search tractable
+    max_ups: 6,
+  };
+
+  const ssInput: OptimizationInput = {
+    ...input,
+    film,
+    films: [film],
+    rules: ssRules,
+    ss_fixed_deckle_mode: true,
+    trim_rule_mode: input.trim_rule_mode || 'NORMAL',
+    custom_min_trim_mm: input.custom_min_trim_mm,
+    custom_max_trim_mm: input.custom_max_trim_mm,
+    planning_mode: input.planning_mode || 'ALL_REMAINING',
+  };
+
+  return executeSingleTreatmentGroupOptimization(ssInput);
 }
 
 /**
@@ -3095,8 +3233,21 @@ export function generatePrimarySlitterPlans(input: OptimizationInput): Optimizat
   const filmMasters = activeFilms.map(f => FILM_MASTERS.find(m => m.code === f));
   const thicknesses = activeFilms.map((f, i) => input.orders.find(o => o.film === f)?.thickness_micron || filmMasters[i]?.thickness_micron || 20);
   const filmThickness = thicknesses[0];
-  const orderWithDensity = input.orders.find(o => activeFilms.includes(o.film) && o.density && !isNaN(o.density));
-  const filmDensity = orderWithDensity?.density || filmMasters[0]?.density || 0.91;
+  // Density: Film Specs Master DB first, then order field — never silent 0.91
+  const missingDensityFilms = findFilmsMissingDensity(activeFilms);
+  if (missingDensityFilms.length > 0) {
+    throw new Error(
+      `Density not saved in Film Specs Master Database for: ${missingDensityFilms.join(', ')}. ` +
+      `Open Master Backlog → Film Specs Master DB and add density for each film before planning.`
+    );
+  }
+  const filmDensity =
+    resolveFilmDensity(activeFilms[0]) ||
+    input.orders.find(o => activeFilms.includes(o.film) && o.density && o.density > 0)?.density ||
+    0;
+  if (!(filmDensity > 0)) {
+    throw new Error(`Density not saved for film(s): ${activeFilms.join(', ')}. Add in Film Specs Master DB.`);
+  }
 
   const eligibleOrders = input.orders.filter(
     o => {

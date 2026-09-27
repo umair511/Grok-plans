@@ -7,7 +7,7 @@ export interface SSJumboRoll {
   id: string;
   roll_id: string; // e.g. "SS-JR-001" or "SS-JR-MZ18-3000-01"
   film: string;    // e.g. "MZ18", "MZ20", "TH21-18", "TH21-20"
-  width_mm: number; // Max 1720 mm
+  width_mm: number; // Max 1730 mm
   length_m: number; // Length in meters
   thickness_micron: number; // Thickness in microns (e.g. 18)
   diameter_mm: number; // Calculated: 1.14 * sqrt(thickness_micron * length_m)
@@ -35,7 +35,9 @@ export interface SSMachineSettings {
   physical_ups: number; // 14
   preferred_ups: number; // 3
   max_planning_ups: number; // 14 (SS has 14 UPS available, can use 1 to 14 UPS)
-  max_jumbo_width_mm: number; // 1720
+  max_jumbo_width_mm: number; // 1730
+  /** PS01 mother deckle for SS jumbo synthesis. Options: 10400 | 10330 | 8700 | 8630 */
+  ps01_deckle_width_mm?: number;
   max_jumbo_diameter_mm: number; // 1000
   min_trim_mm: number; // 11 (GREEN zone min)
   max_trim_mm: number; // 35 (GREEN zone max)

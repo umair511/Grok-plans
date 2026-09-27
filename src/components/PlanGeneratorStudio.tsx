@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { VA05Order, PlanningRules, UserProfile, SlitterPlan, PlanningRun, TrimRuleMode } from '../types';
 import { OptimizationResult, generatePrimarySlitterPlans, isPS01Order } from '../services/optimizer/deckleOptimizer';
+import { findFilmsMissingDensity, getFilmSpecsSnapshotForPlanning } from '../services/stuffing/filmDensities';
 import type { WorkerMessageResponse } from '../services/optimizer/optimizer.worker';
 import OptimizerWorker from '../services/optimizer/optimizer.worker?worker&inline';
-import { commitPlanningRun, getOrdersLedgerFingerprint } from '../services/storage';
+import { commitPlanningRun, getOrdersLedgerFingerprint , saveStoredRules} from '../services/storage';
 import { exportCompleteRunToExcel, downloadExcelBuffer } from '../services/excelExporter';
 import { FILM_MASTERS } from '../services/masterData';
 import { RemainingOrdersTable } from './RemainingOrdersTable';
@@ -36,6 +37,7 @@ interface PlanGeneratorStudioProps {
   preselectedFilm?: string;
   onRunCommitted: (run: PlanningRun, plans: SlitterPlan[], updatedOrders: VA05Order[]) => void;
   onOpenPlan: (plan: SlitterPlan) => void;
+  onRulesUpdated?: (rules: PlanningRules) => void;
 }
 
 export const PlanGeneratorStudio: React.FC<PlanGeneratorStudioProps> = ({
@@ -45,6 +47,7 @@ export const PlanGeneratorStudio: React.FC<PlanGeneratorStudioProps> = ({
   preselectedFilm,
   onRunCommitted,
   onOpenPlan,
+  onRulesUpdated,
 }) => {
   const psOrders = useMemo(() => orders.filter(isPS01Order), [orders]);
   const distinctFilms = useMemo(() => Array.from(new Set(psOrders.map(o => o.film))).sort(), [psOrders]);
@@ -136,6 +139,7 @@ export const PlanGeneratorStudio: React.FC<PlanGeneratorStudioProps> = ({
   const [customMaxTrim, setCustomMaxTrim] = useState<number>(300);
   const [customReason, setCustomReason] = useState<string>('Jumbo roll issue / edge defect');
   const [showRelaxationModal, setShowRelaxationModal] = useState<boolean>(false);
+  const [generationError, setGenerationError] = useState<string | null>(null);
 
   // Dedicated Web Worker Reference for Background Optimization
   const workerRef = useRef<Worker | null>(null);
@@ -241,6 +245,21 @@ export const PlanGeneratorStudio: React.FC<PlanGeneratorStudioProps> = ({
     setWasCancelled(true);
   };
 
+
+  const formatDensityError = (msg: string) => {
+    const m = msg || '';
+    if (/density not saved/i.test(m)) {
+      // Prefer explicit film list from engine message
+      const listed = m.match(/for:\s*([^.]+)/i);
+      const films = listed ? listed[1].trim() : activeFilms.join(', ');
+      return (
+        `Density not saved for film(s): ${films}.\n\n` +
+        `Open Master Backlog → Film Specs Master DB and save density for each film, then try Generate Plans again.`
+      );
+    }
+    return m;
+  };
+
   const executeOptimization = (overrideMode?: TrimRuleMode, minT?: number, maxT?: number, reason?: string) => {
     if (isGenerating) return;
 
@@ -248,11 +267,25 @@ export const PlanGeneratorStudio: React.FC<PlanGeneratorStudioProps> = ({
     console.log(`[OPTIMIZER DEBUG] UI request started | Execution ID: ${execId} START`);
     console.log(`[OPTIMIZER DEBUG] Target: ${targetKg} kg | Film: [${activeFilmDisplay}] | Orders: ${orders.length}`);
 
+    setGenerationError(null);
     setIsGenerating(true);
     setIsCommitted(false);
     setWasCancelled(false);
     setShowRelaxationModal(false);
     setLastCompletionStats(null);
+
+    // Pre-flight: density must exist in Film Specs Master DB (no silent seed)
+    // Permanent: always snapshot from localStorage (just-saved films included)
+    const filmSpecsSnapshot = getFilmSpecsSnapshotForPlanning();
+    const missingDensity = findFilmsMissingDensity(activeFilms);
+    if (missingDensity.length > 0) {
+      setIsGenerating(false);
+      setGenerationError(
+        `Density not saved for film(s): ${missingDensity.join(', ')}.\n\n` +
+        `Open Master Backlog → Film Specs Master DB and save density for each film, then try Generate Plans again.`
+      );
+      return;
+    }
 
     const activeMode = overrideMode || (allowCustomTrim ? 'MANUAL_OVERRIDE' : trimRuleMode);
     const activeMin = minT !== undefined ? minT : (allowCustomTrim ? customMinTrim : undefined);
@@ -318,6 +351,7 @@ export const PlanGeneratorStudio: React.FC<PlanGeneratorStudioProps> = ({
         } else if (type === 'OPTIMIZATION_ERROR') {
           console.error(`[OPTIMIZER DEBUG] Worker error | Execution ID: ${execId}:`, error);
           setIsGenerating(false);
+          setGenerationError(formatDensityError(String(error || 'Optimization failed.')));
           if (workerRef.current === worker) {
             worker.terminate();
             workerRef.current = null;
@@ -335,6 +369,7 @@ export const PlanGeneratorStudio: React.FC<PlanGeneratorStudioProps> = ({
         } catch (directErr) {
           console.error(`[OPTIMIZER DEBUG] Direct execution error | Execution ID: ${execId}:`, directErr);
           setIsGenerating(false);
+          setGenerationError(formatDensityError(directErr instanceof Error ? directErr.message : String(directErr)));
         }
       };
 
@@ -343,6 +378,8 @@ export const PlanGeneratorStudio: React.FC<PlanGeneratorStudioProps> = ({
         type: 'RUN_OPTIMIZATION',
         input: optimizationInput,
         executionId: execId,
+        // Permanent: same snapshot as pre-flight (workers have no localStorage)
+        filmSpecs: filmSpecsSnapshot,
       });
     } catch (err) {
       console.warn(`[OPTIMIZER DEBUG] Worker initialization threw, using direct execution | Execution ID: ${execId}:`, err);
@@ -352,6 +389,7 @@ export const PlanGeneratorStudio: React.FC<PlanGeneratorStudioProps> = ({
       } catch (directErr) {
         console.error(`[OPTIMIZER DEBUG] Direct execution error | Execution ID: ${execId}:`, directErr);
         setIsGenerating(false);
+        setGenerationError(formatDensityError(directErr instanceof Error ? directErr.message : String(directErr)));
       }
     }
   };
@@ -422,7 +460,7 @@ export const PlanGeneratorStudio: React.FC<PlanGeneratorStudioProps> = ({
         <div className="flex items-center space-x-3 text-xs">
           <span className="text-slate-500">Trim Architecture:</span>
           <span className="font-bold text-slate-800 bg-slate-100 px-2.5 py-1 rounded border border-slate-200">
-            {allowCustomTrim ? `Custom: ${customMinTrim}–${customMaxTrim}mm` : trimRuleMode === 'RELAXED_50MM' ? 'Relaxed Yellow: 281–500mm' : 'Normal Green: 150–280mm'} (Deckle 10,400mm)
+            {allowCustomTrim ? `Custom: ${customMinTrim}–${customMaxTrim}mm` : trimRuleMode === 'RELAXED_50MM' ? 'Relaxed Yellow: 281–500mm' : 'Normal Green: 150–280mm'} (Deckle {(rules.deckle_width_mm || 10400).toLocaleString()}mm)
           </span>
         </div>
       </div>
@@ -695,8 +733,8 @@ export const PlanGeneratorStudio: React.FC<PlanGeneratorStudioProps> = ({
 
             {!allowCustomTrim ? (
               <div className="text-[11px] text-slate-500 flex justify-between">
-                <span>Normal Minimum: <strong>140 mm</strong></span>
-                <span>Normal Maximum: <strong>250 mm</strong></span>
+                <span>Normal Minimum: <strong>{rules.min_trim_mm ?? 150} mm</strong></span>
+                <span>Normal Maximum: <strong>{rules.max_trim_mm ?? 280} mm</strong></span>
               </div>
             ) : (
               <div className="space-y-2 pt-1">
@@ -1224,7 +1262,36 @@ export const PlanGeneratorStudio: React.FC<PlanGeneratorStudioProps> = ({
       )}
 
       {/* Confirmation Modal for 50mm Trim Relaxation (Section 9) */}
-      {showRelaxationModal && (
+      
+      {/* Density / generation error popup */}
+      {generationError && (
+        <div className="fixed inset-0 z-[80] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-[2px]">
+          <div className="bg-white rounded-xl shadow-2xl border border-rose-200 max-w-md w-full p-5 space-y-4 animate-in fade-in zoom-in-95 duration-150">
+            <div className="flex items-start space-x-3">
+              <div className="w-10 h-10 rounded-full bg-rose-100 flex items-center justify-center shrink-0">
+                <AlertCircle className="w-5 h-5 text-rose-600" />
+              </div>
+              <div className="min-w-0">
+                <h3 className="text-sm font-bold text-slate-900">Cannot Generate Plans</h3>
+                <p className="text-xs text-slate-600 mt-1.5 whitespace-pre-line leading-relaxed">
+                  {generationError}
+                </p>
+              </div>
+            </div>
+            <div className="flex justify-end gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setGenerationError(null)}
+                className="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-lg cursor-pointer"
+              >
+                OK — Save Density First
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+{showRelaxationModal && (
         <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-950/80 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full p-6 border border-slate-300 space-y-4 animate-in zoom-in-95 duration-150">
             <div className="flex items-center space-x-3">

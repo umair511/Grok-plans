@@ -84,7 +84,7 @@ export const Navbar: React.FC<NavbarProps> = ({
       'orders': 'Master Orders',
       'plans': 'Plans & Schedules',
       'reports': 'Reports & Analytics',
-      'rules': 'Masters & Rules',
+      'rules': 'Machine Parameters',
       'audit': 'Audit Trail',
     };
     if (activeTab === 'films' || activeTab === 'orders') {

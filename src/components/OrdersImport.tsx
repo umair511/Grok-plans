@@ -167,7 +167,7 @@ export const OrdersImport: React.FC<OrdersImportProps> = ({
           'IMPORT',
           'IMPORT_BATCH',
           result.batch.id,
-          `Imported VA05 file [${file.name}] with ${result.orders.length} valid orders (${result.batch.films_detected.length} films)`
+          `Imported Planning Sheet [${file.name}] with ${result.orders.length} valid orders (${result.batch.films_detected.length} films)`
         );
 
         setUploadFeedback({
@@ -191,33 +191,25 @@ export const OrdersImport: React.FC<OrdersImportProps> = ({
   };
 
   const handleExportOrdersToExcel = () => {
+    // Factory Planning Sheet headers — planning-required columns only
     const exportRows = filteredOrders.map(o => ({
-      'Sales Document': o.sales_order,
-      'Item': o.item_number,
+      'Sales Order #': o.sales_order,
+      'Item #': o.item_number,
       'Customer': o.customer,
-      'Material': o.material,
-      'Film': o.film,
+      'Film Code': o.film,
       'Width (mm)': o.width_mm,
       'Length (m)': o.length_m,
-      'Core': `${o.core}"`,
-      'Treatment Side': o.treatment_side,
-      'Ordered Qty (kg)': o.ordered_qty,
-      'Balance Qty (kg)': o.balance_qty,
-      'Produced Qty (kg)': o.produced_qty,
-      'Remaining Qty (kg)': o.remaining_qty,
-      'Status': o.status,
-      'Priority': o.priority ? 'YES' : 'NO',
+      'Core ID': o.core,
+      'TS / MTS': o.treatment_side,
+      'Order Qty': o.ordered_qty,
+      'Bal QtY': o.balance_qty,
       'Delivery Date': o.delivery_date || '',
-      'PO Reference': o.customer_reference || '',
-      'Ship to City': o.ship_to_city || '',
-      'Sales Person': o.sales_person || '',
-      'Payment Term': o.payment_term || '',
     }));
 
     const ws = XLSX.utils.json_to_sheet(exportRows);
     const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'VA05 Orders');
-    XLSX.writeFile(wb, `SAP_VA05_Orders_${new Date().toISOString().slice(0, 10)}.xlsx`);
+    XLSX.utils.book_append_sheet(wb, ws, 'Planning Sheet');
+    XLSX.writeFile(wb, `Planning_Sheet_Orders_${new Date().toISOString().slice(0, 10)}.xlsx`);
   };
 
   // --- CRUD Handlers ---
@@ -300,14 +292,14 @@ export const OrdersImport: React.FC<OrdersImportProps> = ({
           <div>
             <div className="flex items-center space-x-2">
               <h2 className="text-base font-bold text-slate-900 tracking-tight">
-                Master Orders & SAP VA05 Importer
+                Master Orders & Planning Sheet Import
               </h2>
               <span className="text-[10px] px-2 py-0.5 font-mono font-medium rounded-md bg-slate-100 text-slate-600 border border-slate-200">
                 All Modules (SS / MSL / PS)
               </span>
             </div>
             <p className="text-xs text-slate-500 mt-1">
-              Central customer order backlog and SAP VA05 parser serving Secondary Slitter, Metallizer, and Primary Slitter.
+              Central customer order backlog and factory Planning Sheet importer for Secondary Slitter, Metallizer, and Primary Slitter.
             </p>
           </div>
 
@@ -316,14 +308,14 @@ export const OrdersImport: React.FC<OrdersImportProps> = ({
               type="file"
               ref={fileInputRef}
               onChange={handleFileUpload}
-              accept=".xlsx,.xls,.csv"
+              accept=".xlsx,.xls,.xlsm,.csv"
               className="hidden"
             />
             
             <button
               onClick={() => setIsSampleFormOpen(true)}
               className="flex items-center space-x-1.5 px-3 py-1.5 bg-white hover:bg-slate-50 text-slate-700 text-xs font-semibold rounded-lg border border-slate-200 shadow-xs transition-colors cursor-pointer"
-              title="Open interactive VA05 order entry form with presets and downloadable template"
+              title="Open interactive Planning Sheet order entry form with presets and downloadable template"
             >
               <FileSpreadsheet className="w-3.5 h-3.5 text-slate-500" />
               <span>Sample Form</span>
@@ -335,7 +327,7 @@ export const OrdersImport: React.FC<OrdersImportProps> = ({
               className="flex items-center space-x-1.5 px-3.5 py-1.5 bg-slate-900 hover:bg-slate-800 disabled:bg-slate-300 text-white text-xs font-semibold rounded-lg shadow-xs transition-colors cursor-pointer"
             >
               <UploadCloud className="w-3.5 h-3.5" />
-              <span>{isUploading ? 'Validating...' : 'Upload VA05'}</span>
+              <span>{isUploading ? 'Validating...' : 'Upload Planning Sheet'}</span>
             </button>
 
             <button
@@ -759,7 +751,7 @@ export const OrdersImport: React.FC<OrdersImportProps> = ({
                 <div>
                   <div className="font-bold text-slate-900 text-xs">Clear All Orders Completely (0 Orders)</div>
                   <div className="text-[11px] text-slate-500 mt-0.5">
-                    Deletes all {orders.length} orders. Leaves the database empty for a fresh SAP VA05 file upload.
+                    Deletes all {orders.length} orders. Leaves the database empty for a fresh Planning Sheet upload.
                   </div>
                 </div>
               </button>
@@ -775,7 +767,7 @@ export const OrdersImport: React.FC<OrdersImportProps> = ({
                 <div>
                   <div className="font-bold text-slate-900 text-xs">Reset to Factory Backlog (352 Seed Orders)</div>
                   <div className="text-[11px] text-slate-500 mt-0.5">
-                    Restores the initial SAP VA05 pending order backlog dataset.
+                    Restores the initial pending Planning Sheet order backlog.
                   </div>
                 </div>
               </button>
@@ -804,7 +796,7 @@ export const OrdersImport: React.FC<OrdersImportProps> = ({
                 </div>
                 <div>
                   <h3 className="text-base font-bold text-slate-900">Manage Import Batches</h3>
-                  <p className="text-xs text-slate-500">View and manage uploaded SAP VA05 files and batches</p>
+                  <p className="text-xs text-slate-500">View and manage uploaded Planning Sheet files and batches</p>
                 </div>
               </div>
               <button
@@ -871,7 +863,7 @@ export const OrdersImport: React.FC<OrdersImportProps> = ({
         </div>
       )}
 
-      {/* Interactive VA05 Sample Form & Order Entry Modal */}
+      {/* Interactive Planning Sheet Sample Form & Order Entry Modal */}
       <VA05SampleFormModal
         isOpen={isSampleFormOpen}
         onClose={() => setIsSampleFormOpen(false)}

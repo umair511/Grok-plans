@@ -254,7 +254,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
             <FileText className="w-8 h-8 text-slate-300 mx-auto mb-2" />
             <p className="text-xs font-semibold text-slate-700">No planning runs generated yet</p>
             <p className="text-xs text-slate-500 max-w-sm mx-auto mt-0.5">
-              Go to the Planning Studio to generate deterministic slitting plans against pending VA05 demand.
+              Go to the Planning Studio to generate deterministic slitting plans against pending Planning Sheet demand.
             </p>
             <button
               onClick={() => onNavigate('generator', 'TNO20')}

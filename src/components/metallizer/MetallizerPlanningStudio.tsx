@@ -1,3 +1,4 @@
+import { getFilmSpecsSnapshotForPlanning } from '../../services/stuffing/filmDensities';
 import React, { useState, useEffect, useRef } from 'react';
 import { 
   Cpu, 
@@ -24,7 +25,8 @@ import {
   saveStoredJumboRolls, 
   getStoredMetallizerPlans, 
   getStoredJumboRolls,
-  commitMetallizerRunAtomic
+  commitMetallizerRunAtomic,
+  saveStoredMetallizerSettings
 } from '../../services/metallizer/metallizerStorage';
 import { saveStoredOrders, getOrdersLedgerFingerprint } from '../../services/storage';
 import type { MSLWorkerResponse } from '../../services/metallizer/msl.worker';
@@ -39,6 +41,7 @@ interface MetallizerPlanningStudioProps {
   preselectedFilm?: string;
   onRunCommitted: (newPlans: MetallizerPlan[], updatedRolls: JumboRoll[], updatedOrders: VA05Order[]) => void;
   onOpenPlan: (plan: MetallizerPlan) => void;
+  onSettingsSaved?: (settings: MetallizerMachineSettings) => void;
 }
 
 export const MetallizerPlanningStudio: React.FC<MetallizerPlanningStudioProps> = ({
@@ -50,6 +53,7 @@ export const MetallizerPlanningStudio: React.FC<MetallizerPlanningStudioProps> =
   preselectedFilm = 'MZ18',
   onRunCommitted,
   onOpenPlan,
+  onSettingsSaved,
 }) => {
   // Available metallized grades (strictly orders with film code containing "MZ")
   const metallizedOrders = orders.filter(o => isMetallizerOrder(o));
@@ -206,6 +210,7 @@ export const MetallizerPlanningStudio: React.FC<MetallizerPlanningStudioProps> =
         settings,
         film: selectedFilm,
         options: planOptions,
+        filmSpecs: getFilmSpecsSnapshotForPlanning(),
       });
     } catch {
       try {
@@ -268,7 +273,7 @@ export const MetallizerPlanningStudio: React.FC<MetallizerPlanningStudioProps> =
             <span className="px-2.5 py-0.5 text-xs font-bold rounded bg-purple-950 text-purple-300 border border-purple-800">
               METALLIZER OPTIMIZER STUDIO
             </span>
-            <span className="text-xs text-slate-400 font-mono">10" Steel Core · 1–6 UPS · GREEN trim 18–45mm</span>
+            <span className="text-xs text-slate-400 font-mono">10" Steel Core · Default 3-UPS · GREEN trim 18–45mm</span>
           </div>
           <h1 className="text-2xl font-bold text-white tracking-tight mt-1">
             Intelligent Metallizer Slitter Planning Studio
@@ -278,7 +283,25 @@ export const MetallizerPlanningStudio: React.FC<MetallizerPlanningStudioProps> =
           </p>
         </div>
 
-        <div className="flex items-center space-x-3">
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            disabled={isOptimizing}
+            onClick={() => {
+              const next = { ...settings, allow_4_ups: !settings.allow_4_ups };
+              saveStoredMetallizerSettings(next);
+              onSettingsSaved?.(next);
+            }}
+            className={`flex items-center space-x-2 px-4 py-2.5 text-xs font-bold rounded-lg border transition-all cursor-pointer disabled:opacity-50 ${
+              settings.allow_4_ups
+                ? 'bg-amber-500/20 border-amber-400 text-amber-200'
+                : 'bg-slate-800 border-slate-600 text-slate-300 hover:border-slate-500'
+            }`}
+            title="Default OFF: only 3-UPS mother packs. ON: allow 4-UPS fallback like previous logic."
+          >
+            <Layers className="w-3.5 h-3.5" />
+            <span>{settings.allow_4_ups ? '4 UPS Allowed' : '3 UPS Only'}</span>
+          </button>
           <button
             onClick={handleRunOptimizer}
             disabled={isOptimizing || filmOrders.length === 0}
