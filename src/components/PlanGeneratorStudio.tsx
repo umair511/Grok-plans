@@ -5,7 +5,7 @@ import { findFilmsMissingDensity, getFilmSpecsSnapshotForPlanning } from '../ser
 import type { WorkerMessageResponse } from '../services/optimizer/optimizer.worker';
 import OptimizerWorker from '../services/optimizer/optimizer.worker?worker&inline';
 import { commitPlanningRun, getOrdersLedgerFingerprint , saveStoredRules} from '../services/storage';
-import { exportCompleteRunToExcel, downloadExcelBuffer } from '../services/excelExporter';
+import { exportCompleteRunToExcel, exportAllPlansToExcel, downloadExcelBuffer } from '../services/excelExporter';
 import { FILM_MASTERS } from '../services/masterData';
 import { RemainingOrdersTable } from './RemainingOrdersTable';
 import { 
@@ -432,8 +432,12 @@ export const PlanGeneratorStudio: React.FC<PlanGeneratorStudioProps> = ({
 
   const handleDownloadRunExcel = () => {
     if (!optResult) return;
-    const excelBuffer = exportCompleteRunToExcel(optResult.run, optResult.plans, optResult.remaining_orders);
-    downloadExcelBuffer(excelBuffer, `Planning_Run_${optResult.run.run_number}.xlsx`);
+    // One .xlsx file: Summary + Plan1 sheet + Plan2 sheet + … + Remaining
+    const excelBuffer = exportAllPlansToExcel(optResult.run, optResult.plans, optResult.remaining_orders);
+    downloadExcelBuffer(
+      excelBuffer,
+      `All_Plans_${optResult.run.run_number || 'PS'}_${optResult.plans.length}plans.xlsx`
+    );
   };
 
   const targetMax = targetKg * 1.10;
@@ -1040,10 +1044,10 @@ export const PlanGeneratorStudio: React.FC<PlanGeneratorStudioProps> = ({
                 <button
                   onClick={handleDownloadRunExcel}
                   className="px-3 py-2 bg-white/10 hover:bg-white/20 text-white text-xs font-semibold rounded-lg border border-white/20 transition-colors flex items-center space-x-1.5"
-                  title="Download complete multi-sheet Excel workbook"
+                  title="Download ALL plans in one Excel file — Plan1, Plan2, … each on its own sheet"
                 >
                   <Download className="w-4 h-4" />
-                  <span>Download Run Workbook (.xlsx)</span>
+                  <span>Download All Plans (.xlsx)</span>
                 </button>
 
                 <button

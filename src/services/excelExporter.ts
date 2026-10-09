@@ -21,6 +21,18 @@ export function exportSinglePlanToExcel(plan: SlitterPlan): Uint8Array {
  * Generates a complete Multi-Plan Planning Run Excel Workbook
  * Contains Summary Sheet + Individual Plan Sheets + Remaining Demand Sheet
  */
+/**
+ * Download All: one workbook, each plan on its own sheet (Plan1, Plan2, …).
+ * Same as exportCompleteRunToExcel — kept as explicit alias for UI.
+ */
+export function exportAllPlansToExcel(
+  run: PlanningRun,
+  plans: SlitterPlan[],
+  remainingOrders: VA05Order[] = []
+): Uint8Array {
+  return exportCompleteRunToExcel(run, plans, remainingOrders);
+}
+
 export function exportCompleteRunToExcel(
   run: PlanningRun,
   plans: SlitterPlan[],
@@ -63,9 +75,13 @@ export function exportCompleteRunToExcel(
   const wsSummary = XLSX.utils.aoa_to_sheet(summaryData);
   XLSX.utils.book_append_sheet(wb, wsSummary, 'Summary');
 
-  // 2. Individual Plan Sheets (One for each generated plan)
+  // 2. Individual Plan Sheets — Plan 1 → Sheet "Plan1", Plan 2 → "Plan2", …
   plans.forEach((plan, idx) => {
-    const sheetName = `Plan_${String(idx + 1).padStart(2, '0')}`;
+    const n = idx + 1;
+    // Excel sheet name max 31 chars; prefer Plan1 / Plan2 for clarity
+    let sheetName = `Plan${n}`;
+    const pn = (plan.plan_number || '').replace(/[\\/*?:\[\]]/g, '-').slice(0, 24);
+    if (pn) sheetName = `Plan${n}`.slice(0, 31);
     const wsPlan = createPlanWorksheet(plan);
     XLSX.utils.book_append_sheet(wb, wsPlan, sheetName);
   });
@@ -327,7 +343,72 @@ export function consolidatePlanItems(items: PlanItem[] = []): ConsolidatedPlanIt
     });
   });
 
-  return consolidated;
+  // Order rows so each FUTURE SHIFT sits directly under the active size/position
+  // it replaces (change-from size → change-to row immediately below).
+  const getPositions = (row: ConsolidatedPlanItemRow): number[] => {
+    const nums: number[] = [];
+    for (const it of row.raw_items || []) {
+      if (typeof it.position === 'number' && !isNaN(it.position)) nums.push(it.position);
+      if (Array.isArray((it as any).positions)) {
+        for (const p of (it as any).positions) {
+          if (typeof p === 'number') nums.push(p);
+        }
+      }
+    }
+    const label = row.position_label || '';
+    const matches = label.matchAll(/\d+/g);
+    for (const m of matches) {
+      const n = Number(m[0]);
+      if (!isNaN(n) && n > 0 && n < 100) nums.push(n);
+    }
+    return Array.from(new Set(nums));
+  };
+
+  const actives = consolidated.filter(r => !r.is_future_replacement);
+  const futures = consolidated.filter(r => !!r.is_future_replacement);
+
+  actives.sort((a, b) => {
+    const pa = getPositions(a);
+    const pb = getPositions(b);
+    const ma = pa.length ? Math.min(...pa) : 999;
+    const mb = pb.length ? Math.min(...pb) : 999;
+    if (ma !== mb) return ma - mb;
+    return (b.width_mm || 0) - (a.width_mm || 0);
+  });
+
+  const ordered: ConsolidatedPlanItemRow[] = [];
+  const usedFutureKeys = new Set<string>();
+
+  for (const active of actives) {
+    ordered.push(active);
+    const activePos = new Set(getPositions(active));
+    const activeW = Number(active.width_mm || 0);
+
+    const related = futures
+      .filter(f => {
+        if (usedFutureKeys.has(f.key)) return false;
+        const fPos = getPositions(f);
+        // Same physical arm/position → this shift belongs under that active row
+        if (fPos.some(p => activePos.has(p))) return true;
+        // Instruction "CHANGE SIZE {activeW}MM → ..."
+        const instr = `${f.replacement_instruction || ''} ${f.raw_items?.map(r => r.replacement_instruction || '').join(' ') || ''}`;
+        if (activeW > 0 && new RegExp(`CHANGE SIZE\\s*${activeW}\\s*MM`, 'i').test(instr)) return true;
+        // start_pack replacement on same SO chain under this width group
+        return false;
+      })
+      .sort((a, b) => (a.start_pack || 0) - (b.start_pack || 0) || (a.width_mm || 0) - (b.width_mm || 0));
+
+    for (const f of related) {
+      ordered.push(f);
+      usedFutureKeys.add(f.key);
+    }
+  }
+
+  for (const f of futures) {
+    if (!usedFutureKeys.has(f.key)) ordered.push(f);
+  }
+
+  return ordered.length > 0 ? ordered : consolidated;
 }
 
 /**

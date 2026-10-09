@@ -89,7 +89,7 @@ export const PlanningRunsList: React.FC<PlanningRunsListProps> = ({
     e.stopPropagation();
     const runPlans = plans.filter(p => p.planning_run_id === run.run_number || p.planning_run_id === run.id);
     const buffer = exportCompleteRunToExcel(run, runPlans, orders);
-    downloadExcelBuffer(buffer, `Planning_Run_${run.run_number}.xlsx`);
+    downloadExcelBuffer(buffer, `All_Plans_${run.run_number}_${runPlans.length}plans.xlsx`);
   };
 
   const handleDeleteSinglePlan = (plan: SlitterPlan, e: React.MouseEvent) => {
@@ -386,7 +386,7 @@ export const PlanningRunsList: React.FC<PlanningRunsListProps> = ({
                             className="px-2.5 py-1 text-[11px] font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded transition-colors flex items-center space-x-1"
                           >
                             <Download className="w-3 h-3" />
-                            <span>Workbook (.xlsx)</span>
+                            <span>Download All (.xlsx)</span>
                           </button>
                           {onDeleteRun && (
                             <button

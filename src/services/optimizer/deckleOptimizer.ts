@@ -32,6 +32,7 @@ import { resolveFilmDensity, findFilmsMissingDensity } from '../stuffing/filmDen
  */
 export const CUSTOMER_MAX_OVERALLOCATION_FACTOR = 1.10;
 
+
 /**
  * Authoritative PS01 Film Eligibility Check:
  * Excludes any order whose film/code starts with or belongs to the MZ film family.
@@ -177,6 +178,14 @@ export interface MultiPackSimulationResult {
   simulatedOrdersState: Map<string, { remaining_qty: number; produced_qty: number; status: string }>;
   score: number;
   lookaheadCampaignKg?: number;
+  /** When set, commit emits 2 plans at knife-storm boundary; total kg = weight1+weight2 (full run). */
+  presentationSplit?: {
+    afterPack: number;
+    packs1: number;
+    packs2: number;
+    weight1: number;
+    weight2: number;
+  };
 }
 
 /**
@@ -1990,6 +1999,7 @@ export function simulateMultiPackExecution(
   if (packSnapshots.length === 0) return null;
 
   // Elastic Pack Count Evaluation: Test P = maxPacks down to 1 against targetMaxKg
+  // Order fulfillment is the sole primary priority (classic behavior).
   const naturalMaxPacks = packSnapshots.length;
   let bestEvaluatedPackResult: {
     packCount: number;
@@ -2004,7 +2014,7 @@ export function simulateMultiPackExecution(
     }
 
     if (maxAllowedForPlanKg !== undefined && candidateWeight > maxAllowedForPlanKg + 0.0001) {
-      continue; // Exceeds target ceiling, evaluate next smaller pack count
+      continue;
     }
 
     const snap = packSnapshots[p - 1];
@@ -2031,7 +2041,7 @@ export function simulateMultiPackExecution(
     const duplexBonus = (duplexAssign.success && Math.abs(duplexAssign.sideAUps - duplexAssign.sideBUps) <= 1) ? 20000 : 0;
     const mixedPenalty = isMixed ? -200000 : 0;
 
-    // Customer fulfillment dominates: candidateWeight * 1000 ensures real customer kg is not sacrificed
+    // Customer fulfillment dominates
     const candScore =
       mixedPenalty +
       targetProximityBonus +
@@ -2054,6 +2064,64 @@ export function simulateMultiPackExecution(
 
   if (!bestEvaluatedPackResult) {
     return null;
+  }
+
+  // Stable-run PRESENTATION split metadata only — do NOT cut pack count / kg here.
+  // Full natural run keeps order fulfillment; commit may emit 2 plans at storm boundary
+  // with weight1+weight2 = full planned kg (no quantity loss).
+  let presentationSplit: MultiPackSimulationResult['presentationSplit'] = undefined;
+  {
+    const natP = bestEvaluatedPackResult.packCount;
+    if (natP >= 4) {
+      const natSnap = packSnapshots[natP - 1];
+      const widthChanges = (natSnap.changes || []).filter(
+        (c: any) => Number(c.old_width_mm) !== Number(c.new_width_mm)
+      );
+      if (widthChanges.length >= 3) {
+        const byAfter = new Map<number, number>();
+        for (const c of widthChanges) {
+          const ap = Number(c.after_pack);
+          if (!Number.isFinite(ap) || ap < 0) continue;
+          byAfter.set(ap, (byAfter.get(ap) || 0) + 1);
+        }
+        let stormAfter = -1;
+        let stormCount = 0;
+        byAfter.forEach((cnt, ap) => {
+          if (cnt > stormCount || (cnt === stormCount && (stormAfter < 0 || ap < stormAfter))) {
+            if (ap >= 1 && natP - ap >= 2) {
+              stormCount = cnt;
+              stormAfter = ap;
+            }
+          }
+        });
+        if (stormCount < 3) {
+          const sortedAps = Array.from(byAfter.keys()).sort((a, b) => a - b);
+          let cum = 0;
+          for (const ap of sortedAps) {
+            cum += byAfter.get(ap) || 0;
+            if (cum >= 3 && ap >= 1 && natP - ap >= 2) {
+              stormAfter = ap;
+              stormCount = cum;
+              break;
+            }
+          }
+        }
+        if (stormAfter >= 1 && stormCount >= 3 && natP - stormAfter >= 2) {
+          let w1 = 0;
+          for (let i = 0; i < stormAfter; i++) w1 += packSnapshots[i].packWeight;
+          const w2 = bestEvaluatedPackResult.weightKg - w1;
+          if (w1 > 0 && w2 > 0) {
+            presentationSplit = {
+              afterPack: stormAfter,
+              packs1: stormAfter,
+              packs2: natP - stormAfter,
+              weight1: Math.round(w1 * 100) / 100,
+              weight2: Math.round(w2 * 100) / 100,
+            };
+          }
+        }
+      }
+    }
   }
 
   const selectedTotalPacks = bestEvaluatedPackResult.packCount;
@@ -2313,6 +2381,7 @@ export function simulateMultiPackExecution(
     totalUps: currentSetup.reduce((sum, item) => sum + item.ups, 0),
     simulatedOrdersState: finalSnapshot.ordersState,
     score: bestEvaluatedPackResult.score,
+    presentationSplit,
   };
 }
 
@@ -2331,16 +2400,18 @@ export function normalizeTreatmentGroup(ts: string | undefined | null): 'OUTSIDE
 
 /**
  * Hierarchical Plan Dominance Comparator.
- * Strictly enforces:
- * 1. Maximum Real Customer Fulfilled Kg (meaningful difference > 10 kg strictly dominates)
+ * Soft operability: prefer ≤3 in-run size changes unless fulfillment gap is substantial.
+ * Then:
+ * 1. Maximum Real Customer Fulfilled Kg (meaningful difference > 10 kg)
  * 2. Compliance with Demand * 1.10 (already filtered)
  * 3. Physical feasibility (already filtered)
- * 4. Better practical jumbo utilization / usable slit width (higher width / lower trim)
- * 5. Fewer unnecessary knife changes (planChanges.length)
- * 6. Better order closure (prio closed first, then total closed)
- * 7. Higher pack repetitions
- * 8. Trim quality & deterministic tie-breakers (trim closer to 186 mm)
+ * 4. Fewer size changes when kg is tied
+ * 5. Better practical jumbo utilization / usable slit width
+ * 6. Fewer unnecessary knife changes (planChanges.length)
+ * 7. Better order closure (prio closed first, then total closed)
+ * 8. Pack repetitions / trim quality (mild — first plan need not be longest)
  */
+
 export function isPlanDominant(
   candidate: MultiPackSimulationResult,
   incumbent: MultiPackSimulationResult
@@ -2776,9 +2847,16 @@ function executeSingleTreatmentGroupOptimization(
     // Unified selection across Tier 1 + Tier 2 with lookahead
     if (allTierCandidates.length > 0) {
       allTierCandidates.sort((a, b) => {
+        const sc = (r: MultiPackSimulationResult) =>
+          (r.planChanges || []).filter(
+            (c: any) => Number(c.old_width_mm) !== Number(c.new_width_mm)
+          ).length;
+        const aSC = sc(a);
+        const bSC = sc(b);
         if (Math.abs(b.totalPlannedWeightKg - a.totalPlannedWeightKg) > 0.05) {
           return b.totalPlannedWeightKg - a.totalPlannedWeightKg;
         }
+        if (aSC !== bSC) return aSC - bSC;
         if (b.totalSlitWidth_mm !== a.totalSlitWidth_mm) {
           return b.totalSlitWidth_mm - a.totalSlitWidth_mm;
         }
@@ -2827,6 +2905,17 @@ function executeSingleTreatmentGroupOptimization(
 
         cand.lookaheadCampaignKg = cand.totalPlannedWeightKg + downstreamKg;
       }
+
+      // Step 3: re-rank by full campaign (Plan1 + projected Plan2/3) — avoid crumb leftovers
+      candidatesToEvaluate.sort((a, b) => {
+        const aC = a.lookaheadCampaignKg ?? a.totalPlannedWeightKg;
+        const bC = b.lookaheadCampaignKg ?? b.totalPlannedWeightKg;
+        if (Math.abs(bC - aC) > 10) return bC - aC;
+        if (Math.abs(b.totalPlannedWeightKg - a.totalPlannedWeightKg) > 10) {
+          return b.totalPlannedWeightKg - a.totalPlannedWeightKg;
+        }
+        return b.score - a.score;
+      });
 
       bestSimulatedPlan = candidatesToEvaluate[0];
       for (let i = 1; i < candidatesToEvaluate.length; i++) {
@@ -2910,6 +2999,16 @@ function executeSingleTreatmentGroupOptimization(
           );
           cand.lookaheadCampaignKg = cand.totalPlannedWeightKg + downstreamKg;
         }
+
+        candidatesToEvaluate.sort((a, b) => {
+          const aC = a.lookaheadCampaignKg ?? a.totalPlannedWeightKg;
+          const bC = b.lookaheadCampaignKg ?? b.totalPlannedWeightKg;
+          if (Math.abs(bC - aC) > 10) return bC - aC;
+          if (Math.abs(b.totalPlannedWeightKg - a.totalPlannedWeightKg) > 10) {
+            return b.totalPlannedWeightKg - a.totalPlannedWeightKg;
+          }
+          return b.score - a.score;
+        });
 
         bestSimulatedPlan = candidatesToEvaluate[0];
         for (let i = 1; i < candidatesToEvaluate.length; i++) {
@@ -2995,11 +3094,9 @@ function executeSingleTreatmentGroupOptimization(
       break;
     }
 
-    // Commit chosen plan
+    // Commit chosen plan (full deckle / UPS / rules)
+    // If presentationSplit is set, emit 2 plans at knife-storm boundary with FULL kg preserved.
     const chosenPlan = bestSimulatedPlan;
-    const planNumber = `PS1-${dateStr}-${String(planIndex).padStart(3, '0')}`;
-    const planId = `plan-${planNumber}-${Date.now()}-${planIndex}`;
-    const plannedMrLength = chosenPlan.totalPacks * chosenPlan.selected_length;
 
     chosenPlan.simulatedOrdersState.forEach((val, ordId) => {
       const actualOrder = currentOrders.find(o => o.id === ordId);
@@ -3010,6 +3107,64 @@ function executeSingleTreatmentGroupOptimization(
       }
     });
 
+    const split = chosenPlan.presentationSplit;
+    type EmitPart = {
+      packs: number;
+      weightKg: number;
+      changes: typeof chosenPlan.planChanges;
+      label: string;
+    };
+    const emitParts: EmitPart[] = split
+      ? [
+          {
+            packs: split.packs1,
+            weightKg: split.weight1,
+            changes: chosenPlan.planChanges.filter(c => Number(c.after_pack) < split.afterPack),
+            label: 'stable-run',
+          },
+          {
+            packs: split.packs2,
+            weightKg: split.weight2,
+            // Renumber after_pack relative to split; drop AFTER PACK 0 — those
+            // size changes are already applied as the starting layout of Plan B.
+            changes: chosenPlan.planChanges
+              .filter(c => Number(c.after_pack) >= split.afterPack)
+              .map(c => {
+                const rel = Math.max(0, Number(c.after_pack) - split.afterPack);
+                return {
+                  ...c,
+                  after_pack: rel,
+                  instruction: (c.instruction || '').replace(
+                    /AFTER PACK\s+(\d+)/i,
+                    (_m, n) => `AFTER PACK ${Math.max(0, Number(n) - split.afterPack)}`
+                  ),
+                };
+              })
+              .filter(c => Number(c.after_pack) > 0),
+            label: 'post-size-change',
+          },
+        ]
+      : [
+          {
+            packs: chosenPlan.totalPacks,
+            weightKg: chosenPlan.totalPlannedWeightKg,
+            changes: chosenPlan.planChanges,
+            label: 'full',
+          },
+        ];
+
+    if (split) {
+      addLog(
+        `Knife-storm split: Plan A ${split.packs1} packs / ${split.weight1.toFixed(1)} kg + Plan B ${split.packs2} packs / ${split.weight2.toFixed(1)} kg (total ${chosenPlan.totalPlannedWeightKg.toFixed(1)} kg preserved)`,
+        'INFO'
+      );
+    }
+
+    for (const part of emitParts) {
+    const planNumber = `PS1-${dateStr}-${String(planIndex).padStart(3, '0')}`;
+    const planId = `plan-${planNumber}-${Date.now()}-${planIndex}`;
+    const plannedMrLength = part.packs * chosenPlan.selected_length;
+
     const finalPlanItems: PlanItem[] = chosenPlan.planItems.map((item, idx) => ({
       ...item,
       id: `item-${planId}-${idx + 1}`,
@@ -3017,21 +3172,27 @@ function executeSingleTreatmentGroupOptimization(
       segment_id: `seg-${planId}-1`,
     }));
 
-    const finalPlanChanges: PlanChange[] = chosenPlan.planChanges.map((chg, idx) => ({
-      ...chg,
-      id: `change-${planId}-${idx + 1}`,
-      plan_id: planId,
-    }));
+    const finalPlanChanges: PlanChange[] = part.changes
+      .filter(chg => Number(chg.after_pack) > 0)
+      .map((chg, idx) => ({
+        ...chg,
+        id: `change-${planId}-${idx + 1}`,
+        plan_id: planId,
+        instruction:
+          Number(chg.after_pack) > 0
+            ? (chg.instruction || '').replace(/AFTER PACK\s+0\b/i, `AFTER PACK ${chg.after_pack}`)
+            : chg.instruction,
+      }));
 
     const finalPlanSegments: PlanSegment[] = [
       {
         id: `seg-${planId}-1`,
         plan_id: planId,
         segment_number: 1,
-        name: `Initial Layout (Packs 1–${chosenPlan.totalPacks})`,
+        name: `Initial Layout (Packs 1–${part.packs})`,
         start_pack: 1,
-        end_pack: chosenPlan.totalPacks,
-        repetitions: chosenPlan.totalPacks,
+        end_pack: part.packs,
+        repetitions: part.packs,
         total_slit_width_mm: chosenPlan.totalSlitWidth_mm,
         trim_mm: chosenPlan.trim_mm,
         ups: chosenPlan.totalUps,
@@ -3043,7 +3204,7 @@ function executeSingleTreatmentGroupOptimization(
     const trimWeight = calculateTrimWeight(chosenPlan.trim_mm, filmThickness, filmDensity, plannedMrLength);
     const millRollWeight = calculateMillRollWeight(rules.deckle_width_mm, filmThickness, filmDensity, plannedMrLength);
     const wastePercent = Math.round((chosenPlan.trim_mm / rules.deckle_width_mm) * 10000) / 100;
-    const weightPerPack = chosenPlan.totalPlannedWeightKg / chosenPlan.totalPacks;
+    const weightPerPack = part.weightKg / Math.max(1, part.packs);
 
     const newPlan: SlitterPlan = {
       id: planId,
@@ -3062,14 +3223,14 @@ function executeSingleTreatmentGroupOptimization(
       remaining_web_mm: Math.max(0, chosenPlan.trim_mm - (rules.min_trim_mm || 150)),
       ups: chosenPlan.totalUps,
       max_ups_capacity: rules.max_ups,
-      repetitions: chosenPlan.totalPacks,
+      repetitions: part.packs,
       length_m: chosenPlan.selected_length,
       planned_mr_length_m: plannedMrLength,
       mill_roll_weight_kg: millRollWeight,
       trim_weight_kg: trimWeight,
       waste_percent: wastePercent,
-      planned_quantity_kg: chosenPlan.totalPlannedWeightKg,
-      order_weight_kg: chosenPlan.totalOrderWeightKg,
+      planned_quantity_kg: part.weightKg,
+      order_weight_kg: part.weightKg,
       total_reels: chosenPlan.totalReels,
       weight_per_pack_total_kg: weightPerPack,
       rejection_material: activeFilms.map(f => `R-${f}`).join(' / '),
@@ -3100,7 +3261,7 @@ function executeSingleTreatmentGroupOptimization(
     };
 
     generatedPlans.push(newPlan);
-    cumulativePlannedKg += chosenPlan.totalPlannedWeightKg;
+    cumulativePlannedKg += part.weightKg;
 
     const duplexModeLabel = chosenPlan.is_dual_length
       ? `Dual-Length Duplex (${chosenPlan.side_a_length_m}m & ${chosenPlan.side_b_length_m}m)`
@@ -3109,7 +3270,7 @@ function executeSingleTreatmentGroupOptimization(
       : `Balanced Duplex Split (Side A: ${chosenPlan.side_a_ups} · Side B: ${chosenPlan.side_b_ups})`;
 
     addLog(
-      `Plan [${planNumber}] Generated [${duplexModeLabel} · ${chosenPlan.totalPacks} Packs]: ${plannedMrLength.toLocaleString()}m MR · ${chosenPlan.totalUps} UPS (Side A: ${chosenPlan.side_a_ups || '-'} / Side B: ${chosenPlan.side_b_ups || '-'}) · Slit: ${chosenPlan.totalSlitWidth_mm}mm · Trim: ${chosenPlan.trim_mm}mm · Output: ${chosenPlan.totalPlannedWeightKg.toFixed(2)} kg`,
+      `Plan [${planNumber}] Generated [${duplexModeLabel} · ${part.packs} Packs]: ${plannedMrLength.toLocaleString()}m MR · ${chosenPlan.totalUps} UPS · Output: ${part.weightKg.toFixed(2)} kg (${part.label})`,
       'SUCCESS'
     );
 
@@ -3120,7 +3281,8 @@ function executeSingleTreatmentGroupOptimization(
     }
 
     planIndex++;
-  }
+    } // end emitParts
+  } // end while plan loop
 
   const closedCount = currentOrders.filter(o => o.status === 'COMPLETED').length;
   const partialCount = currentOrders.filter(o => o.status === 'PARTIALLY_FULFILLED').length;

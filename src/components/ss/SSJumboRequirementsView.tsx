@@ -2054,11 +2054,17 @@ export const SSJumboRequirementsView: React.FC<SSJumboRequirementsViewProps> = (
                 {filmOrders.map(ord => {
                   // Calculate total allocated weight across all approved requirements for this specific order line
                   const totalAllocatedForOrder = filteredReqs.reduce((sum, req) => {
-                    const matches = (req.orders_covered || []).filter(o => 
-                      (o.order_id && o.order_id === ord.id) ||
-                      (!o.order_id && o.sales_order === ord.sales_order && Number(o.item_number) === Number(ord.item_number) && Number(o.width_mm) === Number(ord.width_mm))
-                    );
-                    return sum + matches.reduce((s, m) => s + (m.weight_kg || 0), 0);
+                    const soOrd = String(ord.sales_order || '').replace(/^SO#/i, '').trim();
+                    const matches = (req.orders_covered || []).filter(o => {
+                      if (o.order_id && String(o.order_id) === String(ord.id)) return true;
+                      const soOc = String(o.sales_order || '').replace(/^SO#/i, '').trim();
+                      return (
+                        soOc === soOrd &&
+                        Number(o.item_number) === Number(ord.item_number) &&
+                        (Number(o.width_mm) === Number(ord.width_mm) || !o.width_mm)
+                      );
+                    });
+                    return sum + matches.reduce((s, m) => s + (Number(m.weight_kg) || 0), 0);
                   }, 0);
 
                   const maxAllowedKg = Number((ord.remaining_qty * SS_CUSTOMER_MAX_OVERALLOCATION_FACTOR).toFixed(2));

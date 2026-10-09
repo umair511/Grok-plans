@@ -139,7 +139,8 @@ export function generateSsJumboRequirementsViaPsEngine(
     film,
     options.settings,
     activeMin,
-    activeMax
+    activeMax,
+    filmOrders
   );
   // Hard cross-plan 1.10 ceiling + coherent rolls/packs/kg
   requirements = enforceCustomerCeilingAndCoherentMetrics(requirements, filmOrders);
@@ -163,7 +164,8 @@ function slitterPlansToSsJumboRequirements(
   film: string,
   settings?: SSMachineSettings,
   trimMinMm: number = 11,
-  trimMaxMm: number = 35
+  trimMaxMm: number = 35,
+  filmOrders: VA05Order[] = []
 ): SSJumboRequirement[] {
   const thicknessDefault = settings?.thickness_micron_default || 10;
   const core = settings?.core || '6" paper core';
@@ -203,22 +205,37 @@ function slitterPlansToSsJumboRequirements(
     >();
 
     for (const it of items) {
-      const so = String(it.sales_order || '').replace(/^SO#/, '');
-      const key = `${so}__${it.item_number}__${it.width_mm}`;
+      const so = String(it.sales_order || '').replace(/^SO#/i, '').trim();
+      const itemNum = Number(it.item_number) || 0;
+      const w = Number(it.width_mm) || 0;
+      const key = `${so}__${itemNum}__${w}`;
       const existing = orderMap.get(key);
       const reels = Number(it.reels || 0);
       const kg = Number(it.total_weight_kg || 0);
+      // Resolve ledger order id so forensic table can match ord.id
+      const matchedOrd = filmOrders.find(
+        o =>
+          String(o.sales_order || '').replace(/^SO#/i, '').trim() === so &&
+          Number(o.item_number) === itemNum &&
+          (w <= 0 || Number(o.width_mm) === w)
+      ) || filmOrders.find(
+        o =>
+          String(o.sales_order || '').replace(/^SO#/i, '').trim() === so &&
+          Number(o.item_number) === itemNum
+      );
+      const realOrderId = matchedOrd?.id ? String(matchedOrd.id) : '';
       if (existing) {
         existing.required_reels += reels;
         existing.weight_kg = Number((existing.weight_kg + kg).toFixed(2));
+        if (!existing.order_id && realOrderId) existing.order_id = realOrderId;
       } else {
         orderMap.set(key, {
-          order_id: `${so}-${it.item_number}`,
+          order_id: realOrderId,
           sales_order: so,
-          item_number: Number(it.item_number) || 0,
-          customer: it.customer || '',
-          width_mm: it.width_mm,
-          length_m: it.length_m || plan.length_m || 3600,
+          item_number: itemNum,
+          customer: it.customer || matchedOrd?.customer || '',
+          width_mm: w,
+          length_m: it.length_m || plan.length_m || matchedOrd?.length_m || 3600,
           required_reels: reels,
           weight_kg: Number(kg.toFixed(2)),
         });
