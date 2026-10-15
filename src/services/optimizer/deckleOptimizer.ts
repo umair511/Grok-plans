@@ -22,7 +22,7 @@ import {
   PlanningRun,
   TrimRuleMode 
 } from '../../types';
-import { calculateSingleReelWeight, calculateTrimWeight, calculateMillRollWeight } from '../weightCalculator';
+import { calculateSingleReelWeight, calculateWeightHighPrecision, calculateTrimWeight, calculateMillRollWeight } from '../weightCalculator';
 import { DEFAULT_PLANNING_RULES, FILM_MASTERS } from '../masterData';
 import { resolveFilmDensity, findFilmsMissingDensity } from '../stuffing/filmDensities';
 
@@ -1402,6 +1402,24 @@ export function simulateMultiPackExecution(
     return null;
   }
 
+  const allSetupLengths = [
+    targetLength || 0,
+    ...currentSetup.map(it => it.length || 0),
+    duplexAssign.sideALength || 0,
+    duplexAssign.sideBLength || 0,
+  ].filter((l): l is number => typeof l === 'number' && l > 0);
+  const masterPackLength = allSetupLengths.length > 0 ? Math.max(...allSetupLengths) : (targetLength || 19500);
+
+  function getArmLengthMultiplier(armLength: number): number {
+    if (masterPackLength > 0 && armLength > 0 && masterPackLength > armLength) {
+      const ratio = Math.round(masterPackLength / armLength);
+      if (ratio === 2 && Math.abs(masterPackLength - 2 * armLength) < 0.001) {
+        return 2;
+      }
+    }
+    return 1;
+  }
+
   const totalSlitInitial = currentSetup.reduce((sum, it) => sum + it.width * it.ups, 0);
   const trimInitial = deckleWidth - totalSlitInitial;
   if (trimInitial < minTrim || trimInitial > maxTrim) {
@@ -1498,15 +1516,17 @@ export function simulateMultiPackExecution(
       const resultingPlanLengths = [...otherArms.map(a => a.length_m), o.length_m];
       if (!isPlanLengthCompatible(resultingPlanLengths)) continue;
 
+      const candMultiplier = getArmLengthMultiplier(o.length_m);
       const candReelW = calculateSingleReelWeight(o.width_mm, filmThickness, filmDensity, o.length_m);
+      const candArmWeight = candReelW * candMultiplier;
       const candBaseDemand = orderBaseDemandMap.get(o.id) || o.remaining_qty;
       const candHist = historicalProducedMap.get(o.id) || 0;
       const rawCandMax = orderMaxAllowedMap.get(o.id) ?? (candBaseDemand * CUSTOMER_MAX_OVERALLOCATION_FACTOR);
-      const candMaxCap = candHist === 0 ? Math.max(rawCandMax, candReelW * 1.00) : rawCandMax;
+      const candMaxCap = candHist === 0 ? Math.max(rawCandMax, candArmWeight * 1.00) : rawCandMax;
 
       // Count how many arms in currentArms are already assigned to this candidate order (excluding posToReplace)
       const alreadyAssignedArms = otherArms.filter(a => a.orderId === o.id).length;
-      const projectedImmediateProd = o.produced_qty + (alreadyAssignedArms + 1) * candReelW;
+      const projectedImmediateProd = o.produced_qty + (alreadyAssignedArms + 1) * candArmWeight;
       if (projectedImmediateProd > candMaxCap + 0.05) continue;
 
       // Deckle trim check (140–250 mm standard window)
@@ -1547,17 +1567,20 @@ export function simulateMultiPackExecution(
     let hasMultiPackCandidate = false;
 
     eligibleCandidates.forEach(cand => {
+      const candMultiplier = getArmLengthMultiplier(cand.length_m);
       const candReelW = calculateSingleReelWeight(cand.width_mm, filmThickness, filmDensity, cand.length_m);
+      const candArmWeight = candReelW * candMultiplier;
       const candBaseDemand = orderBaseDemandMap.get(cand.id) || cand.remaining_qty;
       const candHist = historicalProducedMap.get(cand.id) || 0;
       const rawCandMax = orderMaxAllowedMap.get(cand.id) ?? (candBaseDemand * CUSTOMER_MAX_OVERALLOCATION_FACTOR);
-      const candMaxCap = candHist === 0 ? Math.max(rawCandMax, candReelW * 1.00) : rawCandMax;
+      const candMaxCap = candHist === 0 ? Math.max(rawCandMax, candArmWeight * 1.00) : rawCandMax;
       const alreadyAssignedArms = otherArms.filter(a => a.orderId === cand.id).length;
       const totalArmsOnCand = alreadyAssignedArms + 1;
 
       const remainingCapKg = Math.max(0, candMaxCap - cand.produced_qty);
       const totalReelsPossible = Math.floor((remainingCapKg + 0.05) / candReelW);
-      const packsCanRun = Math.max(1, Math.floor(totalReelsPossible / totalArmsOnCand));
+      const reelsPerPackForCand = totalArmsOnCand * candMultiplier;
+      const packsCanRun = Math.max(1, Math.floor(totalReelsPossible / reelsPerPackForCand));
       const expectedRunPacks = Math.min(3, packsCanRun);
 
       candidatePackStats.set(cand.id, { expectedRunPacks, totalReelsPossible });
@@ -1759,13 +1782,15 @@ export function simulateMultiPackExecution(
       const ord = simOrderMap.get(orderId)!;
       const sampleArm = activeArms.find(a => a.orderId === orderId)!;
       const reelWeight = calculateSingleReelWeight(sampleArm.width_mm, filmThickness, filmDensity, sampleArm.length_m);
+      const multiplier = getArmLengthMultiplier(sampleArm.length_m);
+      const armWeightPerPack = reelWeight * multiplier;
       const baseDemand = orderBaseDemandMap.get(orderId) || ord.remaining_qty;
       const hist = historicalProducedMap.get(orderId) || 0;
       const rawPlanMax = orderMaxAllowedMap.get(orderId) ?? (baseDemand * CUSTOMER_MAX_OVERALLOCATION_FACTOR);
-      const maxCap = hist === 0 ? Math.max(rawPlanMax, reelWeight * 1.00) : rawPlanMax;
+      const maxCap = hist === 0 ? Math.max(rawPlanMax, armWeightPerPack * 1.00) : rawPlanMax;
 
       const remainingCapacity = maxCap - ord.produced_qty;
-      const allowedArmsInPack = Math.max(0, Math.floor((remainingCapacity + 0.05) / reelWeight));
+      const allowedArmsInPack = Math.max(0, Math.floor((remainingCapacity + 0.05) / armWeightPerPack));
 
       if (armCount > allowedArmsInPack) {
         const excess = armCount - allowedArmsInPack;
@@ -1871,33 +1896,38 @@ export function simulateMultiPackExecution(
     // Run active arms for this pack
     for (const arm of activeArms) {
       const ord = simOrderMap.get(arm.orderId)!;
-      const reelWeight = calculateSingleReelWeight(arm.width_mm, filmThickness, filmDensity, arm.length_m);
+      const reelWeight = calculateWeightHighPrecision(arm.width_mm, filmThickness, filmDensity, arm.length_m);
+      const multiplier = getArmLengthMultiplier(arm.length_m);
+      const armWeightThisPack = reelWeight * multiplier;
+
       const baseDemand = orderBaseDemandMap.get(arm.orderId) || ord.remaining_qty;
       const armHist = historicalProducedMap.get(arm.orderId) || 0;
       const rawPlanMax = orderMaxAllowedMap.get(arm.orderId) ?? (baseDemand * CUSTOMER_MAX_OVERALLOCATION_FACTOR);
-      const maxCap = armHist === 0 ? Math.max(rawPlanMax, reelWeight * 1.00) : rawPlanMax;
+      const maxCap = armHist === 0 ? Math.max(rawPlanMax, armWeightThisPack * 1.00) : rawPlanMax;
       
-      ord.produced_qty = Math.round((ord.produced_qty + reelWeight) * 100) / 100;
-      ord.remaining_qty = Math.max(0, Math.round((ord.remaining_qty - reelWeight) * 100) / 100);
+      ord.produced_qty = Math.round((ord.produced_qty + armWeightThisPack) * 100) / 100;
+      ord.remaining_qty = Math.max(0, Math.round((ord.remaining_qty - armWeightThisPack) * 100) / 100);
       ord.status = ord.remaining_qty <= 0.05 ? 'COMPLETED' : 'PARTIALLY_FULFILLED';
 
-      const isNowClosed = (ord.produced_qty + reelWeight > maxCap + 0.05) || ord.remaining_qty <= 0.05;
+      const isNowClosed = (ord.produced_qty + armWeightThisPack > maxCap + 0.05) || ord.remaining_qty <= 0.05;
       if (isNowClosed) {
         completedPositionsThisPack.push(arm.position);
       }
 
-      accumulatedHistory.push({
-        pack: packNum,
-        position: arm.position,
-        orderId: arm.orderId,
-        width_mm: arm.width_mm,
-        length_m: arm.length_m,
-        weightKg: reelWeight,
-        isClosed: isNowClosed,
-      });
+      for (let r = 0; r < multiplier; r++) {
+        accumulatedHistory.push({
+          pack: packNum,
+          position: arm.position,
+          orderId: arm.orderId,
+          width_mm: arm.width_mm,
+          length_m: arm.length_m,
+          weightKg: reelWeight,
+          isClosed: isNowClosed,
+        });
+      }
 
-      packWeight += reelWeight;
-      packReels += 1;
+      packWeight += armWeightThisPack;
+      packReels += multiplier;
     }
 
     const stateClone = new Map<string, { remaining_qty: number; produced_qty: number; status: string }>();
@@ -2056,7 +2086,7 @@ export function simulateMultiPackExecution(
     if (!bestEvaluatedPackResult || candScore > bestEvaluatedPackResult.score) {
       bestEvaluatedPackResult = {
         packCount: p,
-        weightKg: candidateWeight,
+        weightKg: Math.round((candidateWeight + Number.EPSILON) * 100) / 100,
         score: candScore,
       };
     }
@@ -2069,15 +2099,19 @@ export function simulateMultiPackExecution(
   // Stable-run PRESENTATION split metadata only — do NOT cut pack count / kg here.
   // Full natural run keeps order fulfillment; commit may emit 2 plans at storm boundary
   // with weight1+weight2 = full planned kg (no quantity loss).
+  // Split ONLY when knife changes are VERY high (buhat zyada).
+  // Normal 1–5 changes → single plan. Split only for real storms.
+  // Require: ≥8 packs, ≥6 width changes total, ≥4 changes on SAME after_pack,
+  // ≥4 stable packs before + ≥4 packs after, both halves ≥3t.
   let presentationSplit: MultiPackSimulationResult['presentationSplit'] = undefined;
   {
     const natP = bestEvaluatedPackResult.packCount;
-    if (natP >= 4) {
+    if (natP >= 8) {
       const natSnap = packSnapshots[natP - 1];
       const widthChanges = (natSnap.changes || []).filter(
         (c: any) => Number(c.old_width_mm) !== Number(c.new_width_mm)
       );
-      if (widthChanges.length >= 3) {
+      if (widthChanges.length >= 6) {
         const byAfter = new Map<number, number>();
         for (const c of widthChanges) {
           const ap = Number(c.after_pack);
@@ -2087,30 +2121,19 @@ export function simulateMultiPackExecution(
         let stormAfter = -1;
         let stormCount = 0;
         byAfter.forEach((cnt, ap) => {
-          if (cnt > stormCount || (cnt === stormCount && (stormAfter < 0 || ap < stormAfter))) {
-            if (ap >= 1 && natP - ap >= 2) {
+          // Cluster of ≥4 knife changes on one pack boundary
+          if (cnt >= 4 && ap >= 4 && natP - ap >= 4) {
+            if (cnt > stormCount || (cnt === stormCount && ap > stormAfter)) {
               stormCount = cnt;
               stormAfter = ap;
             }
           }
         });
-        if (stormCount < 3) {
-          const sortedAps = Array.from(byAfter.keys()).sort((a, b) => a - b);
-          let cum = 0;
-          for (const ap of sortedAps) {
-            cum += byAfter.get(ap) || 0;
-            if (cum >= 3 && ap >= 1 && natP - ap >= 2) {
-              stormAfter = ap;
-              stormCount = cum;
-              break;
-            }
-          }
-        }
-        if (stormAfter >= 1 && stormCount >= 3 && natP - stormAfter >= 2) {
+        if (stormAfter >= 4 && stormCount >= 4 && natP - stormAfter >= 4) {
           let w1 = 0;
           for (let i = 0; i < stormAfter; i++) w1 += packSnapshots[i].packWeight;
           const w2 = bestEvaluatedPackResult.weightKg - w1;
-          if (w1 > 0 && w2 > 0) {
+          if (w1 >= 3000 && w2 >= 3000) {
             presentationSplit = {
               afterPack: stormAfter,
               packs1: stormAfter,
@@ -2172,10 +2195,11 @@ export function simulateMultiPackExecution(
     const parentAssignedPositions = parent.pack1Positions;
     const parentHistoryEntries = finalHistory.filter(h => h.orderId === parent.orderId && parentAssignedPositions.includes(h.position));
     const parentReels = parentHistoryEntries.length;
-    const parentTotalWeight = parentHistoryEntries.reduce((sum, h) => sum + h.weightKg, 0);
+    const parentTotalWeight = Math.round((parentHistoryEntries.reduce((sum, h) => sum + h.weightKg, 0) + Number.EPSILON) * 100) / 100;
     const parentSingleReelWeight = calculateSingleReelWeight(parentOrderRef.width_mm, filmThickness, filmDensity, parentOrderRef.length_m);
     const parentActiveDeckleMm = parentOrderRef.width_mm * parent.initialUps;
-    const parentWeightPerPackKg = parentSingleReelWeight * parent.initialUps;
+    const parentMultiplier = getArmLengthMultiplier(parentOrderRef.length_m);
+    const parentWeightPerPackKg = parentSingleReelWeight * parent.initialUps * parentMultiplier;
     const parentStartPack = parentHistoryEntries.length > 0 ? Math.min(...parentHistoryEntries.map(h => h.pack)) : 1;
     const parentEndPack = parentHistoryEntries.length > 0 ? Math.max(...parentHistoryEntries.map(h => h.pack)) : selectedTotalPacks;
     const parentActivePacks = parentHistoryEntries.length > 0 ? (parentEndPack - parentStartPack + 1) : selectedTotalPacks;
@@ -2233,7 +2257,7 @@ export function simulateMultiPackExecution(
       const repPositions = Array.from(new Set(repEntries.map(h => h.position))).sort((a, b) => a - b);
       const repEndPack = Math.max(...repEntries.map(h => h.pack));
       const repActivePacks = repEndPack - repStartPack + 1;
-      const repTotalWeight = repEntries.reduce((sum, h) => sum + h.weightKg, 0);
+      const repTotalWeight = Math.round((repEntries.reduce((sum, h) => sum + h.weightKg, 0) + Number.EPSILON) * 100) / 100;
       const repReels = repEntries.length;
       const repWidth = Number(repOrderRef.width_mm || 0);
 
@@ -2356,7 +2380,7 @@ export function simulateMultiPackExecution(
 
   return {
     initialCombination: currentSetup,
-    selected_length: targetLength,
+    selected_length: masterPackLength,
     is_mixed: isMixed,
     is_dual_core: duplexAssign.isDualCore || isDualCoreFinal,
     is_dual_length: duplexAssign.isDualLength || isDualLenFinal,
@@ -2685,7 +2709,7 @@ function executeSingleTreatmentGroupOptimization(
   let stopReason = 'Planning completed: target output or eligible order closure achieved.';
   let suggestRelaxation = false;
 
-  const MAX_PLANS_PER_RUN = _ssFixedDeckleMode ? 12 : 25;
+  const MAX_PLANS_PER_RUN = _ssFixedDeckleMode ? 10 : 12;
 
   while (cumulativePlannedKg < targetKg && generatedPlans.length < MAX_PLANS_PER_RUN) {
     if (cumulativePlannedKg >= targetKg && cumulativePlannedKg <= targetMaxKg) {
@@ -3098,6 +3122,19 @@ function executeSingleTreatmentGroupOptimization(
     // If presentationSplit is set, emit 2 plans at knife-storm boundary with FULL kg preserved.
     const chosenPlan = bestSimulatedPlan;
 
+    // Skip micro-plans once campaign already has real weight (stops plan explosion)
+    if (
+      generatedPlans.length >= 1 &&
+      chosenPlan.totalPlannedWeightKg < 1200 &&
+      cumulativePlannedKg >= targetKg * 0.70
+    ) {
+      addLog(
+        `Skipping micro-plan ${chosenPlan.totalPlannedWeightKg.toFixed(0)} kg — campaign already at ${cumulativePlannedKg.toFixed(0)} kg.`,
+        'INFO'
+      );
+      break;
+    }
+
     chosenPlan.simulatedOrdersState.forEach((val, ordId) => {
       const actualOrder = currentOrders.find(o => o.id === ordId);
       if (actualOrder) {
@@ -3282,6 +3319,22 @@ function executeSingleTreatmentGroupOptimization(
 
     planIndex++;
     } // end emitParts
+
+    // Stop outer loop when leftover is crumbs — prevents dozens of tiny follow-up plans
+    {
+      const residualKg = currentOrders.reduce(
+        (s, o) => s + Math.max(0, Number(o.remaining_qty) || 0),
+        0
+      );
+      const minMeaningful = Math.max(800, targetKg * 0.025);
+      if (residualKg < minMeaningful && cumulativePlannedKg >= targetKg * 0.80) {
+        addLog(
+          `Stopping: residual ${residualKg.toFixed(0)} kg below meaningful threshold (${minMeaningful.toFixed(0)} kg) after ${generatedPlans.length} plan(s).`,
+          'INFO'
+        );
+        break;
+      }
+    }
   } // end while plan loop
 
   const closedCount = currentOrders.filter(o => o.status === 'COMPLETED').length;

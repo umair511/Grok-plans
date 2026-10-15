@@ -42,7 +42,7 @@ export function calculateBatchWeight(
   lengthM: number,
   reelsCount: number
 ): number {
-  const singleWeight = calculateSingleReelWeight(widthMm, thicknessMicron, density, lengthM);
+  const singleWeight = calculateWeightHighPrecision(widthMm, thicknessMicron, density, lengthM);
   const total = singleWeight * reelsCount;
   return Math.round((total + Number.EPSILON) * 100) / 100;
 }
