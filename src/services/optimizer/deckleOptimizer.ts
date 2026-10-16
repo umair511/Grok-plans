@@ -2696,7 +2696,13 @@ function executeSingleTreatmentGroupOptimization(
     ? input.target_quantity_kg
     : totalDemandKg;
 
-  const isTargetQuantityMode = input.planning_mode === 'TARGET_QUANTITY' || input.target_quantity_kg !== undefined;
+  // Explicit target mode is active ONLY when user selects TARGET_QUANTITY with a sub-target less than total demand.
+  // In ALL_REMAINING or backlog planning, planning continues up to targetMaxKg so every individual order can be produced up to its +10% ceiling.
+  const isExplicitTargetMode = input.planning_mode === 'TARGET_QUANTITY' &&
+    input.target_quantity_kg !== undefined &&
+    input.target_quantity_kg > 0 &&
+    input.target_quantity_kg < totalDemandKg * 0.999;
+  const isTargetQuantityMode = isExplicitTargetMode;
   const targetMaxKg = targetKg * CUSTOMER_MAX_OVERALLOCATION_FACTOR; // Hard +10.0% Global Target Ceiling
 
   addLog(`Total open demand: ${totalDemandKg.toLocaleString()} kg across ${currentOrders.length} order lines`);
@@ -2710,9 +2716,10 @@ function executeSingleTreatmentGroupOptimization(
   let suggestRelaxation = false;
 
   const MAX_PLANS_PER_RUN = _ssFixedDeckleMode ? 10 : 12;
+  const planningCeilingKg = isExplicitTargetMode ? targetKg : targetMaxKg;
 
-  while (cumulativePlannedKg < targetKg && generatedPlans.length < MAX_PLANS_PER_RUN) {
-    if (cumulativePlannedKg >= targetKg && cumulativePlannedKg <= targetMaxKg) {
+  while (cumulativePlannedKg < planningCeilingKg && generatedPlans.length < MAX_PLANS_PER_RUN) {
+    if (isExplicitTargetMode && cumulativePlannedKg >= targetKg && cumulativePlannedKg <= targetMaxKg) {
       stopReason = `Target quantity achieved within +10% maximum tolerance (${cumulativePlannedKg.toFixed(2)} kg / ${targetKg.toLocaleString()} kg · ${((cumulativePlannedKg / targetKg) * 100).toFixed(2)}%).`;
       addLog(stopReason, 'SUCCESS');
       break;
@@ -3321,6 +3328,7 @@ function executeSingleTreatmentGroupOptimization(
     } // end emitParts
 
     // Stop outer loop when leftover is crumbs — prevents dozens of tiny follow-up plans
+    // But never abandon orders that still have at least 1 full reel of remaining demand.
     {
       const residualKg = currentOrders.reduce(
         (s, o) => s + Math.max(0, Number(o.remaining_qty) || 0),
@@ -3328,11 +3336,25 @@ function executeSingleTreatmentGroupOptimization(
       );
       const minMeaningful = Math.max(800, targetKg * 0.025);
       if (residualKg < minMeaningful && cumulativePlannedKg >= targetKg * 0.80) {
-        addLog(
-          `Stopping: residual ${residualKg.toFixed(0)} kg below meaningful threshold (${minMeaningful.toFixed(0)} kg) after ${generatedPlans.length} plan(s).`,
-          'INFO'
-        );
-        break;
+        // Before stopping, check if any individual order still has at least 1 reel
+        // worth of remaining quantity. If so, keep planning — those are real orders.
+        const hasOrderWithFullReelBalance = currentOrders.some(o => {
+          if (o.remaining_qty <= 0.05) return false;
+          const singleReelKg = calculateSingleReelWeight(o.width_mm, filmThickness, filmDensity, o.length_m);
+          return o.remaining_qty >= singleReelKg * 0.95;
+        });
+        if (hasOrderWithFullReelBalance) {
+          addLog(
+            `Residual ${residualKg.toFixed(0)} kg is below threshold (${minMeaningful.toFixed(0)} kg) but orders with full-reel balances remain — continuing planning.`,
+            'INFO'
+          );
+        } else {
+          addLog(
+            `Stopping: residual ${residualKg.toFixed(0)} kg below meaningful threshold (${minMeaningful.toFixed(0)} kg) after ${generatedPlans.length} plan(s).`,
+            'INFO'
+          );
+          break;
+        }
       }
     }
   } // end while plan loop
@@ -3522,7 +3544,11 @@ export function generatePrimarySlitterPlans(input: OptimizationInput): Optimizat
   const targetKg = input.target_quantity_kg !== undefined && input.target_quantity_kg > 0
     ? input.target_quantity_kg
     : totalDemandKg;
-  const isTargetQuantityMode = input.planning_mode === 'TARGET_QUANTITY' || input.target_quantity_kg !== undefined;
+  const isExplicitTargetMode = input.planning_mode === 'TARGET_QUANTITY' &&
+    input.target_quantity_kg !== undefined &&
+    input.target_quantity_kg > 0 &&
+    input.target_quantity_kg < totalDemandKg * 0.999;
+  const isTargetQuantityMode = isExplicitTargetMode;
   const targetMaxKg = targetKg * CUSTOMER_MAX_OVERALLOCATION_FACTOR;
 
   for (const groupKey of presentGroups) {
